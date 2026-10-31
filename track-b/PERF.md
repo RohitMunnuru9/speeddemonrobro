@@ -43,3 +43,16 @@ Official memory fell 38% against cf4fee3; time improved only about 3%.
 The next small change skips empty bitmap words during output aggregation.
 A pooled one-pass index and an all-indexed DNF query rewrite were correct but
 showed no clear end-to-end local gain; neither is retained.
+
+Empty-word receipt for 9e77b66: run-a8ff69f0ea53, all gates passed,
+T=0.726549 s, M=88,817,664 bytes, S=648, K=12.465990, points=54.786339.
+
+Next candidate uses one-pass estimated reserve buffers with exact overflow,
+non-overlapping AVX2 token classification, a blocked Bloom rejection filter,
+vectorized count/sum aggregation, and byte positions for selected phrase anchors.
+No estimate controls correctness. Full public output, tiny/sample seeds 1/2,
+32-byte SIMD boundary cases, >65,535-byte documents and reserve-overflow cases
+are validation gates. Local native full runs were around 1.3-1.5 s and 370 MB
+RSS including mapped input; extra reserve/position memory must earn its cost on
+the board. Training now uses full seed-17 data. Larger direct hot-token caches
+showed little benefit and were not retained. Official measurement is pending.

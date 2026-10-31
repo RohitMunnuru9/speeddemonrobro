@@ -8,16 +8,37 @@
 #include <immintrin.h>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <numeric>
+#include <span>
 #include <string_view>
 #include <unordered_map>
 
 using IDs = std::vector<uint32_t>;
 using ShortIDs = std::vector<uint16_t>;
+struct PostingSpan {
+  uint32_t offset = 0;
+  uint16_t count = 0, capacity = 0;
+};
+struct PostingBuffer {
+  ShortIDs values;
+  std::vector<ShortIDs> overflow;
+};
 struct PostingStore {
-  const ShortIDs *values;
-  const IDs *offsets, *starts;
+  const std::vector<PostingBuffer> *buffers;
+  const std::vector<PostingSpan> *spans;
+  const IDs *starts;
   size_t terms, workers;
+  std::span<const uint16_t> range(size_t worker, size_t term) const {
+    const auto &span = (*spans)[worker * terms + term];
+    if (!span.count)
+      return {};
+    const auto &buffer = (*buffers)[worker];
+    return span.capacity
+               ? std::span<const uint16_t>(buffer.values.data() + span.offset,
+                                           span.count)
+               : std::span<const uint16_t>(buffer.overflow[span.offset]);
+  }
 };
 struct PostingView {
   const PostingStore *store = nullptr;
@@ -32,18 +53,15 @@ struct PostingView {
     size_t worker = 0, position = 0;
     void skip() {
       while (worker < view->store->workers) {
-        size_t key = worker * view->store->terms + view->term;
-        if (position <
-            (*view->store->offsets)[key + 1] - (*view->store->offsets)[key])
+        if (position < view->store->range(worker, view->term).size())
           break;
         ++worker;
         position = 0;
       }
     }
     uint32_t operator*() const {
-      size_t key = worker * view->store->terms + view->term;
       return (*view->store->starts)[worker] +
-             (*view->store->values)[(*view->store->offsets)[key] + position];
+             view->store->range(worker, view->term)[position];
     }
     Iterator &operator++() {
       ++position;
@@ -68,10 +86,9 @@ struct PostingView {
     size_t worker =
         std::upper_bound(store->starts->begin(), store->starts->end(), doc) -
         store->starts->begin() - 1;
-    size_t key = worker * store->terms + term;
-    auto first = store->values->begin() + (*store->offsets)[key];
-    auto last = store->values->begin() + (*store->offsets)[key + 1];
-    return std::binary_search(first, last, doc - (*store->starts)[worker]);
+    auto values = store->range(worker, term);
+    return std::binary_search(values.begin(), values.end(),
+                              doc - (*store->starts)[worker]);
   }
 };
 bool word_byte(unsigned char c) {
@@ -80,47 +97,71 @@ bool word_byte(unsigned char c) {
 template <class F>
 __attribute__((target("avx2"))) void tokenize(std::string_view text,
                                               F consume) {
-  const char *p = text.data(), *end = p + text.size();
-  while (p < end) {
-    while (p < end && !word_byte(*p))
-      ++p;
-    if (p == end)
-      break;
-    if (end - p >= 32) {
-      auto raw = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
-      auto lower = _mm256_or_si256(raw, _mm256_set1_epi8(32));
-      auto letters =
-          _mm256_and_si256(_mm256_cmpgt_epi8(lower, _mm256_set1_epi8('a' - 1)),
-                           _mm256_cmpgt_epi8(_mm256_set1_epi8('z' + 1), lower));
-      auto digits =
-          _mm256_and_si256(_mm256_cmpgt_epi8(raw, _mm256_set1_epi8('0' - 1)),
-                           _mm256_cmpgt_epi8(_mm256_set1_epi8('9' + 1), raw));
-      uint32_t separators =
-          ~uint32_t(_mm256_movemask_epi8(_mm256_or_si256(letters, digits)));
-      if (separators) {
-        size_t size = __builtin_ctz(separators);
-        char bytes[32];
-        const auto positions = _mm256_setr_epi8(
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
-            19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
-        auto keep = _mm256_cmpgt_epi8(_mm256_set1_epi8(size), positions);
-        _mm256_storeu_si256(reinterpret_cast<__m256i *>(bytes),
-                            _mm256_and_si256(lower, keep));
-        p += size;
-        if (!consume(std::string_view(bytes, size)))
-          return;
-        continue;
-      }
+  // Classify every input byte once, rather than reclassifying an overlapping
+  // 32-byte window for each short word. Buffers are private to each worker.
+  static thread_local std::unique_ptr<char[]> lower;
+  static thread_local size_t capacity = 0;
+  static thread_local std::vector<uint32_t> masks;
+  if (capacity < text.size() + 64) {
+    capacity = (text.size() + 64) * 2;
+    lower = std::make_unique_for_overwrite<char[]>(capacity);
+  }
+  size_t blocks = (text.size() + 31) / 32;
+  masks.resize(blocks + 1);
+  masks[blocks] = 0;
+  auto classify = [&](auto raw, size_t block) {
+    auto folded = _mm256_or_si256(raw, _mm256_set1_epi8(32));
+    auto letters =
+        _mm256_and_si256(_mm256_cmpgt_epi8(folded, _mm256_set1_epi8('a' - 1)),
+                         _mm256_cmpgt_epi8(_mm256_set1_epi8('z' + 1), folded));
+    auto digits =
+        _mm256_and_si256(_mm256_cmpgt_epi8(raw, _mm256_set1_epi8('0' - 1)),
+                         _mm256_cmpgt_epi8(_mm256_set1_epi8('9' + 1), raw));
+    masks[block] = _mm256_movemask_epi8(_mm256_or_si256(letters, digits));
+    _mm256_storeu_si256(reinterpret_cast<__m256i *>(lower.get() + block * 32),
+                        folded);
+  };
+  size_t offset = 0;
+  for (; offset + 32 <= text.size(); offset += 32)
+    classify(_mm256_loadu_si256(
+                 reinterpret_cast<const __m256i *>(text.data() + offset)),
+             offset / 32);
+  if (offset < text.size()) {
+    char tail[32]{};
+    memcpy(tail, text.data() + offset, text.size() - offset);
+    classify(_mm256_loadu_si256(reinterpret_cast<const __m256i *>(tail)),
+             offset / 32);
+  }
+  _mm256_storeu_si256(reinterpret_cast<__m256i *>(lower.get() + text.size()),
+                      _mm256_setzero_si256());
+  const auto positions = _mm256_setr_epi8(
+      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+      21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
+  size_t at = 0;
+  while (at < text.size()) {
+    uint32_t mask = masks[at / 32] >> (at % 32);
+    if (!mask) {
+      at = (at / 32 + 1) * 32;
+      continue;
     }
-    char bytes[32]{};
-    size_t size = 0;
-    while (p < end && word_byte(*p)) {
-      if (size == sizeof(bytes))
-        throw std::runtime_error("token exceeds spec bound");
-      unsigned char c = *p++;
-      bytes[size++] = c >= 'A' && c <= 'Z' ? c + 32 : c;
-    }
-    if (!consume(std::string_view(bytes, size)))
+    at += std::countr_zero(mask);
+    size_t first = at;
+    at += std::countr_one(masks[at / 32] >> (at % 32));
+    while (at < text.size() && at % 32 == 0 && (masks[at / 32] & 1))
+      at += std::countr_one(masks[at / 32]);
+    size_t size = at - first;
+    if (size > 32)
+      throw std::runtime_error("token exceeds spec bound");
+    auto key = _mm256_loadu_si256(
+        reinterpret_cast<const __m256i *>(lower.get() + first));
+    auto keep = _mm256_cmpgt_epi8(_mm256_set1_epi8(size), positions);
+    char bytes[32];
+    _mm256_storeu_si256(reinterpret_cast<__m256i *>(bytes),
+                        _mm256_and_si256(key, keep));
+    if constexpr (std::is_invocable_r_v<bool, F, std::string_view, size_t>) {
+      if (!consume(std::string_view(bytes, size), first))
+        return;
+    } else if (!consume(std::string_view(bytes, size)))
       return;
   }
 }
@@ -171,23 +212,69 @@ std::string format(const PostingView &ids) {
   out += '\n';
   return out;
 }
-std::string format_bits(const std::vector<uint64_t> &bits) {
-  uint64_t count = 0, sum = 0;
-  IDs first;
-  for (size_t i = 0; i < bits.size(); ++i) {
-    uint64_t w = bits[i];
-    if (!w)
+__attribute__((target("avx2"))) std::string
+format_bits(const std::vector<uint64_t> &bits) {
+  const auto zero = _mm256_setzero_si256(), nibble = _mm256_set1_epi8(15);
+  const auto pop =
+      _mm256_setr_epi8(0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4, 0, 1, 1,
+                       2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4);
+  const auto weight =
+      _mm256_setr_epi8(0, 0, 1, 1, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 6, 6, 0, 0, 1,
+                       1, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 6, 6);
+  const auto byte_positions = _mm256_setr_epi8(
+      0, 8, 16, 24, 32, 40, 48, 56, 0, 8, 16, 24, 32, 40, 48, 56, 0, 8, 16, 24,
+      32, 40, 48, 56, 0, 8, 16, 24, 32, 40, 48, 56);
+  auto bases = _mm256_setr_epi64x(0, 64, 128, 192);
+  auto counts = zero, sums = zero;
+  size_t i = 0;
+  for (; i + 4 <= bits.size(); i += 4) {
+    auto words =
+        _mm256_loadu_si256(reinterpret_cast<const __m256i *>(bits.data() + i));
+    auto current_bases = bases;
+    bases = _mm256_add_epi64(bases, _mm256_set1_epi64x(256));
+    if (_mm256_testz_si256(words, words))
       continue;
-    uint64_t n = std::popcount(w);
-    count += n;
-    sum += i * 64 * n + std::popcount(w & 0xAAAAAAAAAAAAAAAAULL) +
-           2 * std::popcount(w & 0xCCCCCCCCCCCCCCCCULL) +
-           4 * std::popcount(w & 0xF0F0F0F0F0F0F0F0ULL) +
-           8 * std::popcount(w & 0xFF00FF00FF00FF00ULL) +
-           16 * std::popcount(w & 0xFFFF0000FFFF0000ULL) +
-           32 * std::popcount(w & 0xFFFFFFFF00000000ULL);
+    auto low = _mm256_and_si256(words, nibble),
+         high = _mm256_and_si256(_mm256_srli_epi16(words, 4), nibble);
+    auto lower_count = _mm256_shuffle_epi8(pop, low),
+         upper_count = _mm256_shuffle_epi8(pop, high);
+    auto byte_count = _mm256_add_epi8(lower_count, upper_count);
+    auto within =
+        _mm256_add_epi8(_mm256_add_epi8(_mm256_shuffle_epi8(weight, low),
+                                        _mm256_shuffle_epi8(weight, high)),
+                        _mm256_slli_epi16(upper_count, 2));
+    auto product = _mm256_madd_epi16(
+        _mm256_maddubs_epi16(byte_positions, byte_count), _mm256_set1_epi16(1));
+    auto paired = _mm256_hadd_epi32(product, zero);
+    auto byte_sum = _mm256_shuffle_epi32(paired, _MM_SHUFFLE(3, 1, 2, 0));
+    auto word_count = _mm256_sad_epu8(byte_count, zero);
+    counts = _mm256_add_epi64(counts, word_count);
+    sums = _mm256_add_epi64(
+        sums, _mm256_add_epi64(
+                  _mm256_mul_epu32(word_count, current_bases),
+                  _mm256_add_epi64(byte_sum, _mm256_sad_epu8(within, zero))));
+  }
+  uint64_t count_lanes[4], sum_lanes[4];
+  _mm256_storeu_si256(reinterpret_cast<__m256i *>(count_lanes), counts);
+  _mm256_storeu_si256(reinterpret_cast<__m256i *>(sum_lanes), sums);
+  uint64_t count = 0, sum = 0;
+  for (size_t lane = 0; lane < 4; ++lane) {
+    count += count_lanes[lane];
+    sum += sum_lanes[lane];
+  }
+  for (; i < bits.size(); ++i) {
+    uint64_t w = bits[i];
+    count += std::popcount(w);
+    while (w) {
+      sum += i * 64 + std::countr_zero(w);
+      w &= w - 1;
+    }
+  }
+  IDs first;
+  for (size_t j = 0; j < bits.size() && first.size() < 10; ++j) {
+    uint64_t w = bits[j];
     while (w && first.size() < 10) {
-      first.push_back(i * 64 + std::countr_zero(w));
+      first.push_back(j * 64 + std::countr_zero(w));
       w &= w - 1;
     }
   }
@@ -202,6 +289,7 @@ std::string format_bits(const std::vector<uint64_t> &bits) {
   out += '\n';
   return out;
 }
+
 int main(int argc, char **argv) {
   try {
     const std::string data = argc > 1 ? argv[1] : "/data",
@@ -258,10 +346,13 @@ int main(int argc, char **argv) {
     while (capacity < words.size() * 2)
       capacity *= 2;
     std::vector<TermSlot> table(capacity);
+    std::array<uint64_t, 8192> bloom{};
     std::vector<Key> keys(words.size());
     for (uint32_t id = 0; id < words.size(); ++id) {
       memcpy(&keys[id], words[id].data(), words[id].size());
       uint64_t hash = key_hash(keys[id]);
+      bloom[(hash >> 12) & (bloom.size() - 1)] |=
+          (uint64_t{1} << (hash & 63)) | (uint64_t{1} << ((hash >> 6) & 63));
       size_t slot = hash & (capacity - 1);
       while (table[slot].prefix)
         slot = (slot + 1) & (capacity - 1);
@@ -284,6 +375,10 @@ int main(int argc, char **argv) {
           return cached.id;
       }
       uint64_t hash = key_hash(key);
+      uint64_t mask =
+          (uint64_t{1} << (hash & 63)) | (uint64_t{1} << ((hash >> 6) & 63));
+      if ((bloom[(hash >> 12) & (bloom.size() - 1)] & mask) != mask)
+        return UINT32_MAX;
       size_t slot = hash & (capacity - 1);
       while (table[slot].prefix) {
         const auto &entry = table[slot];
@@ -325,6 +420,18 @@ int main(int argc, char **argv) {
         return true;
       });
     }
+    IDs position_ids(words.size(), UINT32_MAX);
+    uint32_t position_terms = 0;
+    for (const auto &q : queries)
+      if (q.phrase) {
+        auto anchor = *std::min_element(
+            q.terms.begin(), q.terms.end(), [&](auto x, auto y) {
+              return sample_frequency[x] < sample_frequency[y];
+            });
+        if (sample_frequency[anchor] <= 128 &&
+            position_ids[anchor] == UINT32_MAX)
+          position_ids[anchor] = position_terms++;
+      }
     std::vector<std::vector<uint64_t>> bitmaps(words.size());
     for (uint32_t term = 0; term < words.size(); ++term)
       if (!keys[term].b && sample_tokens[term]) {
@@ -350,46 +457,62 @@ int main(int argc, char **argv) {
     // Each block owns whole bitmap words and stores sparse document IDs as
     // exact uint16 offsets. Views merge blocks lazily, avoiding a full copy of
     // postings.
-    ShortIDs counts(workers * words.size()), values;
-    IDs offsets, cursors;
-    auto index_documents = [&](size_t t, bool fill) {
+    std::vector<PostingSpan> spans(workers * words.size());
+    std::vector<PostingBuffer> buffers(workers);
+    std::vector<std::vector<IDs>> positions(workers,
+                                            std::vector<IDs>(position_terms));
+    parallel(workers, [&](size_t t) {
+      auto &buffer = buffers[t];
+      size_t total = 0, block = starts[t + 1] - starts[t];
+      for (size_t term = 0; term < words.size(); ++term) {
+        auto &posting = spans[t * words.size() + term];
+        posting.offset = total;
+        if (!bitmaps[term].empty() || !block)
+          continue;
+        size_t estimate = sample_count
+                              ? (uint64_t(sample_frequency[term] + 1) * block +
+                                 sample_count - 1) /
+                                    sample_count
+                              : 0;
+        posting.capacity = std::min(block, estimate + 4);
+        total += posting.capacity;
+      }
+      buffer.values.resize(total);
       ShortIDs last(words.size(), UINT16_MAX);
       for (uint32_t id = starts[t]; id < starts[t + 1]; ++id) {
         uint16_t relative = id - starts[t];
-        tokenize(texts[id], [&](std::string_view token) {
+        tokenize(texts[id], [&](std::string_view token, size_t byte_offset) {
           uint32_t term = lookup_term(token);
-          if (term == UINT32_MAX || (fill && !bitmaps[term].empty()) ||
-              last[term] == relative)
+          if (term != UINT32_MAX && position_ids[term] != UINT32_MAX &&
+              texts[id].size() <= UINT16_MAX)
+            positions[t][position_ids[term]].push_back(
+                (uint32_t(relative) << 16) | uint32_t(byte_offset));
+          if (term == UINT32_MAX || last[term] == relative)
             return true;
           last[term] = relative;
           if (!bitmaps[term].empty())
             bitmaps[term][id / 64] |= uint64_t{1} << (id % 64);
           else {
-            size_t key = t * words.size() + term;
-            if (fill)
-              values[cursors[key]++] = relative;
-            else
-              ++counts[key];
+            auto &posting = spans[t * words.size() + term];
+            if (posting.capacity && posting.count < posting.capacity)
+              buffer.values[posting.offset + posting.count] = relative;
+            else {
+              if (posting.capacity) {
+                auto begin = buffer.values.begin() + posting.offset;
+                buffer.overflow.emplace_back(begin, begin + posting.count);
+                posting.offset = buffer.overflow.size() - 1;
+                posting.capacity = 0;
+              }
+              buffer.overflow[posting.offset].push_back(relative);
+            }
+            ++posting.count;
           }
           return true;
         });
       }
-    };
-    parallel(workers, [&](size_t t) { index_documents(t, false); });
-    offsets.resize(counts.size() + 1);
-    uint32_t total = 0;
-    for (size_t i = 0; i < counts.size(); ++i) {
-      offsets[i] = total;
-      total += counts[i];
-    }
-    offsets.back() = total;
-    values.resize(total);
-    cursors = offsets;
-    parallel(workers, [&](size_t t) { index_documents(t, true); });
-    ShortIDs().swap(counts);
-    IDs().swap(cursors);
+    });
     // PROFILE_INDEX_DONE
-    PostingStore store{&values, &offsets, &starts, words.size(), workers};
+    PostingStore store{&buffers, &spans, &starts, words.size(), workers};
     std::vector<PostingView> postings(words.size());
     std::atomic<size_t> next{0};
     parallel(workers, [&](size_t) {
@@ -400,7 +523,7 @@ int main(int argc, char **argv) {
         size_t count = 0;
         for (size_t t = 0; t < workers; ++t) {
           size_t key = t * words.size() + term;
-          count += offsets[key + 1] - offsets[key];
+          count += spans[key].count;
         }
         postings[term] = {&store, term, count};
       }
@@ -506,9 +629,75 @@ int main(int argc, char **argv) {
         } else {
           a.clear();
           uint32_t anchor = *std::min_element(
-              q.terms.begin(), q.terms.end(),
-              [&](auto x, auto y) { return frequencies[x] < frequencies[y]; });
+              q.terms.begin(), q.terms.end(), [&](auto x, auto y) {
+                if ((position_ids[x] != UINT32_MAX) !=
+                    (position_ids[y] != UINT32_MAX))
+                  return position_ids[x] != UINT32_MAX;
+                return frequencies[x] < frequencies[y];
+              });
+          size_t anchor_index =
+              std::find(q.terms.begin(), q.terms.end(), anchor) -
+              q.terms.begin();
           auto candidate_doc = [&](uint32_t doc) {
+            if (position_ids[anchor] != UINT32_MAX &&
+                texts[doc].size() <= UINT16_MAX) {
+              size_t worker =
+                  std::upper_bound(starts.begin(), starts.end(), doc) -
+                  starts.begin() - 1;
+              const auto &list = positions[worker][position_ids[anchor]];
+              uint32_t base = (doc - starts[worker]) << 16;
+              auto occurrence =
+                  std::lower_bound(list.begin(), list.end(), base);
+              const char *begin = texts[doc].data(),
+                         *end = begin + texts[doc].size();
+              auto equal_word = [&](const char *first, const char *last,
+                                    uint32_t term) {
+                auto expected = words[term];
+                if (size_t(last - first) != expected.size())
+                  return false;
+                for (size_t k = 0; k < expected.size(); ++k)
+                  if ((static_cast<unsigned char>(first[k]) | 32) !=
+                      static_cast<unsigned char>(expected[k]))
+                    return false;
+                return true;
+              };
+              for (; occurrence != list.end() &&
+                     (*occurrence >> 16) == (base >> 16);
+                   ++occurrence) {
+                const char *at = begin + (*occurrence & UINT16_MAX);
+                bool found = true;
+                for (size_t k = anchor_index; k > 0; --k) {
+                  while (at > begin && !word_byte(at[-1]))
+                    --at;
+                  const char *last = at;
+                  while (at > begin && word_byte(at[-1]))
+                    --at;
+                  if (!equal_word(at, last, q.terms[k - 1])) {
+                    found = false;
+                    break;
+                  }
+                }
+                if (!found)
+                  continue;
+                at = begin + (*occurrence & UINT16_MAX) + words[anchor].size();
+                for (size_t k = anchor_index + 1; k < q.terms.size(); ++k) {
+                  while (at < end && !word_byte(*at))
+                    ++at;
+                  const char *first = at;
+                  while (at < end && word_byte(*at))
+                    ++at;
+                  if (!equal_word(first, at, q.terms[k])) {
+                    found = false;
+                    break;
+                  }
+                }
+                if (found) {
+                  a.push_back(doc);
+                  return;
+                }
+              }
+              return;
+            }
             bool candidate = true;
             for (auto term : q.terms)
               if (term != anchor) {

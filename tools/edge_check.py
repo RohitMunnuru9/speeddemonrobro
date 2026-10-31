@@ -36,6 +36,13 @@ records = b'id,name,note,region_id,amount\r\n' + b''.join(
     for i in range(60000))
 regions = b'region_id,country\n7,AAA\n'
 check("c", {"records.csv": records, "regions.csv": regions}, c.run_reference(records, regions))
+# Equal first/last windows and lengths force more than 128 identical hashes.
+# Full byte comparisons and the exact overflow map must still distinguish keys.
+records = b'id,name,note,region_id,amount\r\n' + b''.join(
+    f'{i+1},"abcdefgh{i%200:010d}mnopqrst","",{7+(i//200)%2},0.01\r\n'.encode()
+    for i in range(20000))
+regions = b'region_id,country\n7,AAA\n8,BBB\n'
+check("c", {"records.csv": records, "regions.csv": regions}, c.run_reference(records, regions))
 for threads in (1, 6, 12):
     check("d", {"graph.txt": d.EXAMPLE_GRAPH, "queries.txt": d.EXAMPLE_QUERIES}, d.EXAMPLE_OUTPUT, threads)
 chain = [(u, u+1, 1) for u in range(199)] + [(u+1, u, 2) for u in range(199)] + [(200, 201, 4294967295), (201, 200, 4294967295)]

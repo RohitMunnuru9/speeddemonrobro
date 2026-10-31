@@ -33,7 +33,7 @@ Each track's PERF.md records its exact run ID and measurements. Local measuremen
 and practice-board results are distinct from final holdout scoring.
 
 The offline builds use compiler profile guidance from an independently generated
-seed-17 sample. Only the compiled executable enters the final image; it builds
+full-size seed-17 dataset. Only the compiled executable enters the final image; it builds
 all data structures from the supplied runtime files. The training generators are
 byte-identical copies of the published organizer sources, excluded from S under
 the published-copies rule. No training outputs or precomputed answers are shipped.

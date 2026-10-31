@@ -55,3 +55,13 @@ still compares all name bytes, and membership bits already observed set skip
 fetch_or. Native full runs were roughly 0.20-0.28 s and 211-212 MB RSS including
 mapped input. Full seeds 1/2 and concurrent edge checks pass. SIMD decimal
 parsing added complexity without a clear gain and was rejected. Board pending.
+
+Compact-table receipt for 9e77b66: run-160a4c4d2daf, all gates passed,
+T=0.072499 s, M=36,007,936 bytes, S=346, K=18.861986, points=63.779370.
+Memory fell, but time and K regressed against the previous best.
+
+Next candidate separates 16-byte table metadata from occupied key/mask records,
+aligns each record to 64 bytes and restores 262,144 slots. Payload capacity is
+input bytes plus a bounded header/padding allowance per slot. Full seeds 1/2,
+concurrent duplicate names and >128 deliberately identical short-window hashes
+pass. Build-time training now uses full seed-17 data. Official measurement pending.

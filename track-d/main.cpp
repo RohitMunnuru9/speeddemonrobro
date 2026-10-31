@@ -81,7 +81,7 @@ struct SearchState {
     return UINT64_MAX;
   }
   bool relax(uint32_t node, uint64_t distance) {
-    if ((used + 1) * 4 > entries.size() * 3) {
+    if ((used + 1) * 2 > entries.size()) {
       auto old = std::move(entries);
       entries.resize(old.size() * 2);
       used = 0;
@@ -106,6 +106,10 @@ struct SearchState {
 };
 struct Edge {
   uint32_t v, w;
+};
+struct Node {
+  std::array<Edge, 3> local;
+  uint32_t count = 0, overflow = 0;
 };
 struct Raw {
   uint32_t u, v, w;
@@ -179,24 +183,27 @@ int main(int argc, char **argv) {
         raw[i++] = {u, v, w};
       }
     });
-    std::array<std::vector<uint32_t>, 2> offsets{std::vector<uint32_t>(n + 1),
-                                                 std::vector<uint32_t>(n + 1)};
-    std::array<std::vector<Edge>, 2> edges;
-    // Radix ordering replaces random CSR scatter writes with sequential
-    // streams.
+    std::array<std::vector<Node>, 2> adjacency;
+    std::array<std::vector<Edge>, 2> overflow;
+    // Sparse road graphs usually fit their first three outgoing arcs directly
+    // in a 32-byte node. Larger degrees use exact contiguous overflow ranges.
     for (size_t side = 0; side < 2; ++side) {
       radix_sort(raw, n, side == 1, builders);
-      edges[side].resize(m);
-      uint32_t node = 0;
-      for (uint32_t i = 0; i < m; ++i) {
-        Raw e = raw[i];
-        uint32_t u = side ? e.v : e.u;
-        while (node <= u)
-          offsets[side][node++] = i;
-        edges[side][i] = {side ? e.u : e.v, e.w};
+      adjacency[side].resize(n);
+      overflow[side].reserve(m / 3);
+      for (auto edge : raw) {
+        uint32_t u = side ? edge.v : edge.u;
+        Edge value{side ? edge.u : edge.v, edge.w};
+        auto &node = adjacency[side][u];
+        if (node.count < 3)
+          node.local[node.count] = value;
+        else {
+          if (node.count == 3)
+            node.overflow = overflow[side].size();
+          overflow[side].push_back(value);
+        }
+        ++node.count;
       }
-      while (node <= n)
-        offsets[side][node++] = m;
     }
     std::vector<Raw>().swap(raw);
     // PROFILE_GRAPH_DONE
@@ -226,8 +233,7 @@ int main(int argc, char **argv) {
           answers[i] = 0;
           continue;
         }
-        if (offsets[0][s] == offsets[0][s + 1] ||
-            offsets[1][t] == offsets[1][t + 1])
+        if (!adjacency[0][s].count || !adjacency[1][t].count)
           continue;
         state[0].clear();
         state[1].clear();
@@ -251,15 +257,20 @@ int main(int argc, char **argv) {
             continue;
           if (auto opposite = state[other].get(u); opposite != UINT64_MAX)
             best = std::min(best, d + opposite);
-          for (uint32_t e = offsets[side][u]; e < offsets[side][u + 1]; ++e) {
-            auto [v, w] = edges[side][e];
+          auto relax_edge = [&](Edge edge) {
+            auto [v, w] = edge;
             uint64_t nd = d + w;
             if (state[side].relax(v, nd)) {
               heap[side].push(nd, v);
               if (auto opposite = state[other].get(v); opposite != UINT64_MAX)
                 best = std::min(best, nd + opposite);
             }
-          }
+          };
+          const auto &node = adjacency[side][u];
+          for (size_t e = 0; e < std::min<uint32_t>(3, node.count); ++e)
+            relax_edge(node.local[e]);
+          for (size_t e = 3; e < node.count; ++e)
+            relax_edge(overflow[side][node.overflow + e - 3]);
         }
         if (best != UINT64_MAX)
           answers[i] = best;

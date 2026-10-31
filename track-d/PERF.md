@@ -48,6 +48,17 @@ about 176.8 MB for 4, 6 and 12 workers, dominated by graph construction. We sele
 12 workers for an official trial; local four-CPU times do not establish a
 speed gain on the scoring box. The packed-state code remains in Git history.
 
+Sparse-state receipt for 9e77b66: run-3569b54af56f, all gates passed,
+T=0.415448 s, M=176,226,304 bytes, S=366, K=13.271896, points=56.146649.
+Twelve workers improved time 24.5% against dde1d70 while lowering peak memory.
+
+Next candidate stores the first three arcs inline per node, retaining exact
+overflow for higher degrees, and lowers query-table load to at most 50%.
+Native full runs were roughly 0.99-1.07 s, with about 269 MB RSS including mapped
+input. Full seeds 1/2 and independent graph tests pass. A forward-only inline
+variant was correct but took about 1.83-2.03 s and was rejected. Compiler training
+now uses full seed-17 data; the offline build and full public hash pass. Board pending.
+
 Rejected local experiments: BFS vertex ordering reduced query time but added too
 much preprocessing (roughly 0.9-1.1 s build); degree-two contraction reduced full
 nodes from 1,740,512 to 1,342,958 but increased total time; pruning unqueried

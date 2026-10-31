@@ -18,21 +18,27 @@ struct Country {
 };
 struct Name {
   uint32_t offset = 0, length = 0;
-  std::array<std::atomic<uint64_t>, 4> countries{};
   std::atomic<uint64_t> hash{0};
+};
+struct NameBody {
+  std::array<std::atomic<uint64_t>, 4> countries{};
 };
 // Collision checks always compare the actual bytes; hashes are not identities.
 struct NameTable {
   size_t capacity;
   std::unique_ptr<Name[]> entries;
-  std::unique_ptr<char[]> arena;
+  std::unique_ptr<char, decltype(&std::free)> arena;
   std::atomic<size_t> arena_used{0};
   std::mutex mutex;
   std::unordered_map<std::string_view, std::array<uint64_t, 4>> overflow;
   NameTable(size_t size, size_t bytes)
       : capacity(size), entries(std::make_unique<Name[]>(size)),
-        arena(std::make_unique_for_overwrite<char[]>(bytes)) {
-    if (bytes > UINT32_MAX)
+        arena(static_cast<char *>(std::aligned_alloc(
+                  64, (bytes + size * 96 + 63) & ~size_t{63})),
+              std::free) {
+    if (!arena)
+      throw std::bad_alloc();
+    if (bytes + size * 96 > UINT32_MAX)
       throw std::runtime_error("CSV exceeds key arena bound");
   }
   bool mark(std::string_view text, size_t country) {
@@ -58,10 +64,13 @@ struct NameTable {
                           present, 1, std::memory_order_acq_rel)) {
         // Copy each distinct key once into compact storage. Comparing against
         // scattered first occurrences in the 200 MB input caused cache misses.
-        // Unique payload bytes cannot exceed the input file's byte count.
+        // Payload bytes are bounded by input size; the arena also reserves a
+        // 32-byte mask and up to 63 padding bytes per possible occupied slot.
+        size_t allocation = (sizeof(NameBody) + text.size() + 63) & ~size_t{63};
         char *owned = arena.get() + arena_used.fetch_add(
-                                        text.size(), std::memory_order_relaxed);
-        memcpy(owned, text.data(), text.size());
+                                        allocation, std::memory_order_relaxed);
+        std::construct_at(reinterpret_cast<NameBody *>(owned));
+        memcpy(owned + sizeof(NameBody), text.data(), text.size());
         entry.offset = owned - arena.get();
         entry.length = text.size();
         entry.hash.store(hash, std::memory_order_release);
@@ -70,8 +79,11 @@ struct NameTable {
       while (present == 1)
         present = entry.hash.load(std::memory_order_acquire);
       if (present == hash &&
-          std::string_view(arena.get() + entry.offset, entry.length) == text) {
-        auto &membership = entry.countries[country / 64];
+          std::string_view(arena.get() + entry.offset + sizeof(NameBody),
+                           entry.length) == text) {
+        auto &membership =
+            reinterpret_cast<NameBody *>(arena.get() + entry.offset)
+                ->countries[country / 64];
         // Bits only change from zero to one. An observed one needs no write;
         // fetch_or arbitrates exactly once when several workers see zero.
         if (membership.load(std::memory_order_relaxed) & bit)
@@ -172,7 +184,7 @@ int main(int argc, char **argv) {
     }
     std::vector<std::vector<Country>> groups(
         workers, std::vector<Country>(codes.size()));
-    NameTable names(input.size > 1000000 ? 131072 : 2048, input.size);
+    NameTable names(input.size > 1000000 ? 262144 : 2048, input.size);
     parallel(workers, [&](size_t t) {
       const char *q = boundary[t];
       while (q < boundary[t + 1]) {

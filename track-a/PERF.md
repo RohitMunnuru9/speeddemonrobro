@@ -44,3 +44,14 @@ Twelve workers are selected for the scoring machine. Native full-seed-1 runs
 were approximately 0.11-0.18 s with about 279 MB RSS including mapped input.
 Full seeds 1/2 pass. SIMD space scanning was correct but had only a marginal
 local effect and was omitted. Official measurement of this layout is pending.
+
+Layout receipt for 9e77b66: run-d18fa4b05fd8, all gates passed,
+T=0.064404 s, M=48,898,048 bytes, S=343, K=23.125735, points=68.204778.
+
+Next candidate appends directly to per-worker group buckets, uses three inline
+values and lazily allocated 64-group pages, and writes hour buffers without a
+joined copy. Full seeds 1/2 pass. Native full time was roughly 0.12-0.16 s and
+270-271 MB RSS including mapped input. A compressed temporary-record variant
+was correct but was superseded by this direct grouping layout. Compiler training
+now uses the full seed-17 scale; local offline build and full public hash pass.
+Official time/memory/source tradeoff remains to be measured.

@@ -15,8 +15,9 @@ membership fetch-or counts each name/country pair once across all workers.
 The CSV quote encoding is injective, so comparing encoded name payloads gives
 exact decoded equality without allocating strings. Quoted and unquoted empty
 payloads compare equal. Escapes are still counted to obtain decoded byte lengths.
-Each distinct key is copied once into a compact arena, reducing cache misses
-when later records compare against it. Arena capacity is bounded by input bytes.
+Each distinct key and its country mask occupy a cache-line-aligned arena record.
+The 16-byte table entries contain hash, offset and length; empty slots do not
+allocate masks. Arena capacity includes input bytes and bounded slot overhead.
 The table uses 32-bit arena offsets and lengths at the published sub-4-GB scale,
 and an exact fallback for probe chains over 128 entries. Membership bits already
 observed set need no atomic write. Country IDs fit in a byte (240 countries plus
@@ -25,7 +26,7 @@ Notes are scanned without allocation. Input is mapped read-only, sums use 64-bit
 integers, countries without records are omitted, and output keys sort bytewise.
 
 No external dependencies. Optional arguments select input and output directories.
-The offline compiler profile comes from a generated seed-17 sample; only the
+The offline compiler profile comes from full-size generated seed-17 data; only the
 executable enters the final image. SD_THREADS supports 1-12 parsing workers.
 
 With another 24 hours: reduce shared-table cache traffic and compare AVX2 quote

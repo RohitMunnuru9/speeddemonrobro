@@ -58,7 +58,7 @@ def main():
     (ROOT / ".build").mkdir(exist_ok=True)
     records = []
     for track in args.tracks:
-        run(["g++", "-std=c++20", "-O3", "-DNDEBUG", "-pthread", "-Wall", "-Wextra", "-Wpedantic", ROOT / f"track-{track}/main.cpp", "-o", ROOT / ".build" / track])
+        run(["g++", "-std=c++20", "-O3", "-march=x86-64-v3", "-DNDEBUG", "-pthread", "-Wall", "-Wextra", "-Wpedantic", ROOT / f"track-{track}/main.cpp", "-o", ROOT / ".build" / track])
         mod = load_test(track)
         data = ROOT / ".data/edge" / track
         data.mkdir(parents=True, exist_ok=True)

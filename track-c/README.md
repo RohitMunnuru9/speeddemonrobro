@@ -17,6 +17,10 @@ exact decoded equality without allocating strings. Quoted and unquoted empty
 payloads compare equal. Escapes are still counted to obtain decoded byte lengths.
 Each distinct key is copied once into a compact arena, reducing cache misses
 when later records compare against it. Arena capacity is bounded by input bytes.
+The table uses 32-bit arena offsets and lengths at the published sub-4-GB scale,
+and an exact fallback for probe chains over 128 entries. Membership bits already
+observed set need no atomic write. Country IDs fit in a byte (240 countries plus
+the unmatched group). The short-window hash always checks full key bytes.
 Notes are scanned without allocation. Input is mapped read-only, sums use 64-bit
 integers, countries without records are omitted, and output keys sort bytewise.
 

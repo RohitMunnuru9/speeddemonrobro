@@ -176,6 +176,8 @@ std::string format_bits(const std::vector<uint64_t> &bits) {
   IDs first;
   for (size_t i = 0; i < bits.size(); ++i) {
     uint64_t w = bits[i];
+    if (!w)
+      continue;
     uint64_t n = std::popcount(w);
     count += n;
     sum += i * 64 * n + std::popcount(w & 0xAAAAAAAAAAAAAAAAULL) +

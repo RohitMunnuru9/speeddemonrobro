@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -16,7 +17,7 @@ struct Country {
   int64_t sum = 0, lo = INT64_MAX, hi = INT64_MIN;
 };
 struct Name {
-  std::string_view text;
+  uint32_t offset = 0, length = 0;
   std::array<std::atomic<uint64_t>, 4> countries{};
   std::atomic<uint64_t> hash{0};
 };
@@ -30,9 +31,22 @@ struct NameTable {
   std::unordered_map<std::string_view, std::array<uint64_t, 4>> overflow;
   NameTable(size_t size, size_t bytes)
       : capacity(size), entries(std::make_unique<Name[]>(size)),
-        arena(std::make_unique_for_overwrite<char[]>(bytes)) {}
+        arena(std::make_unique_for_overwrite<char[]>(bytes)) {
+    if (bytes > UINT32_MAX)
+      throw std::runtime_error("CSV exceeds key arena bound");
+  }
   bool mark(std::string_view text, size_t country) {
-    uint64_t hash = std::hash<std::string_view>{}(text);
+    uint64_t first = 0, last = 0;
+    if (text.size() < 8)
+      memcpy(&first, text.data(), text.size());
+    else {
+      memcpy(&first, text.data(), 8);
+      memcpy(&last, text.data() + text.size() - 8, 8);
+    }
+    uint64_t hash = first ^ std::rotl(last, 29) ^ text.size();
+    hash ^= hash >> 33;
+    hash *= 0xff51afd7ed558ccdULL;
+    hash ^= hash >> 33;
     if (hash < 2)
       hash += 2;
     size_t slot = hash & (capacity - 1);
@@ -48,16 +62,22 @@ struct NameTable {
         char *owned = arena.get() + arena_used.fetch_add(
                                         text.size(), std::memory_order_relaxed);
         memcpy(owned, text.data(), text.size());
-        entry.text = {owned, text.size()};
+        entry.offset = owned - arena.get();
+        entry.length = text.size();
         entry.hash.store(hash, std::memory_order_release);
         present = hash;
       }
       while (present == 1)
         present = entry.hash.load(std::memory_order_acquire);
-      if (present == hash && entry.text == text)
-        return !(entry.countries[country / 64].fetch_or(
-                     bit, std::memory_order_relaxed) &
-                 bit);
+      if (present == hash &&
+          std::string_view(arena.get() + entry.offset, entry.length) == text) {
+        auto &membership = entry.countries[country / 64];
+        // Bits only change from zero to one. An observed one needs no write;
+        // fetch_or arbitrates exactly once when several workers see zero.
+        if (membership.load(std::memory_order_relaxed) & bit)
+          return false;
+        return !(membership.fetch_or(bit, std::memory_order_relaxed) & bit);
+      }
       slot = (slot + 1) & (capacity - 1);
     }
     // Unbounded exact fallback for unusually large/skewed vocabularies. Slots
@@ -112,7 +132,7 @@ int main(int argc, char **argv) {
     std::array<int16_t, 26 * 26 * 26> country_index;
     country_index.fill(-1);
     std::vector<std::string> codes;
-    std::vector<uint16_t> regions(1000000, UINT16_MAX);
+    std::vector<uint8_t> regions(1000000, UINT8_MAX);
     const char *p = lookup.data, *end = p + lookup.size;
     while (p < end && *p++ != '\n') {
     }
@@ -127,12 +147,12 @@ int main(int argc, char **argv) {
       }
       p += 4;
       if (id >= regions.size())
-        regions.resize(id + 1, UINT16_MAX);
+        regions.resize(id + 1, UINT8_MAX);
       regions[id] = index;
     }
     const size_t unmatched = codes.size();
     codes.emplace_back("_UNMATCHED");
-    if (codes.size() > 256)
+    if (codes.size() > 255)
       throw std::runtime_error("country limit exceeded");
     p = input.data;
     end = p + input.size;
@@ -152,7 +172,7 @@ int main(int argc, char **argv) {
     }
     std::vector<std::vector<Country>> groups(
         workers, std::vector<Country>(codes.size()));
-    NameTable names(input.size > 1000000 ? 262144 : 2048, input.size);
+    NameTable names(input.size > 1000000 ? 131072 : 2048, input.size);
     parallel(workers, [&](size_t t) {
       const char *q = boundary[t];
       while (q < boundary[t + 1]) {
@@ -179,7 +199,7 @@ int main(int argc, char **argv) {
           ++q;
         if (q < end && *q == '\n')
           ++q;
-        size_t c = region < regions.size() && regions[region] != UINT16_MAX
+        size_t c = region < regions.size() && regions[region] != UINT8_MAX
                        ? regions[region]
                        : unmatched;
         auto &g = groups[t][c];

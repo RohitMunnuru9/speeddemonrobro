@@ -36,6 +36,18 @@ Local four-CPU Docker medians for 4/6/12 query workers were 0.651/0.623/0.679 s,
 with local cgroup peaks 210.9/267.6/438.7 MB. Four workers retain the best local
 time-memory tradeoff, and remain the default. Official PGO measurement is pending.
 
+PGO receipt for dde1d70: run-38704b25b6ff, all gates passed,
+T=0.550362 s, M=210,796,544 bytes, S=324, K=11.330497, points=52.712448.
+
+Next candidate replaces dense node-sized distance/generation vectors with exact
+flat query-state tables. The table grows with visited nodes and uses uint64
+distances, so it has no distance-packing restriction. Native full times were
+about 1.09-1.21 s, with 263-264 MB RSS including mapped input. Full seeds 1/2
+and independent arbitrary-graph checks pass. Local Docker cgroup peaks remained
+about 176.8 MB for 4, 6 and 12 workers, dominated by graph construction. We select
+12 workers for an official trial; local four-CPU times do not establish a
+speed gain on the scoring box. The packed-state code remains in Git history.
+
 Rejected local experiments: BFS vertex ordering reduced query time but added too
 much preprocessing (roughly 0.9-1.1 s build); degree-two contraction reduced full
 nodes from 1,740,512 to 1,342,958 but increased total time; pruning unqueried

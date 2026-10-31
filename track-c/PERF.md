@@ -42,3 +42,16 @@ Docker process medians were 0.155 s with 6 workers and 0.144 s with 12, with loc
 cgroup peaks about 20.3/20.6 MB. Docker has only four CPUs here, so these are not
 predictions of the scoring machine. We selected 12 workers for a board trial.
 Full seeds 1/2 and concurrent duplicate-name tests remain correctness gates.
+
+PGO/arena receipt for dde1d70: run-b532ac44db17, all gates passed,
+T=0.064260 s, M=46,096,384 bytes, S=328, K=19.222491, points=64.190483.
+Time improved 1.53x against cf4fee3, but official memory rose substantially;
+the earlier local cgroup figure did not predict the board peak.
+
+Next candidate halves the table capacity to 131,072 slots, uses compact 32-bit
+arena offsets/lengths, and stores country IDs in one byte. The existing exact
+overflow map preserves correctness for long probe chains. A short-window hash
+still compares all name bytes, and membership bits already observed set skip
+fetch_or. Native full runs were roughly 0.20-0.28 s and 211-212 MB RSS including
+mapped input. Full seeds 1/2 and concurrent edge checks pass. SIMD decimal
+parsing added complexity without a clear gain and was rejected. Board pending.

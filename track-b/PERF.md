@@ -36,3 +36,10 @@ Rejected runtime rare-anchor/DNF planner: full output stayed correct, but
 rechecking raw text raised native full time to 2.92-3.19 s. It is not retained.
 Every index is built from the runtime input, and corpus/query bytes can vary
 with the seed. No precomputed index or answer file is included.
+
+Compact-posting/PGO receipt for dde1d70: run-35580c12514b, all gates passed,
+T=0.798123 s, M=88,948,736 bytes, S=646, K=11.895908, points=53.769880.
+Official memory fell 38% against cf4fee3; time improved only about 3%.
+The next small change skips empty bitmap words during output aggregation.
+A pooled one-pass index and an all-indexed DNF query rewrite were correct but
+showed no clear end-to-end local gain; neither is retained.

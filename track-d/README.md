@@ -5,9 +5,11 @@ by source/destination enables sequential writes into forward/reverse CSR arrays.
 No route index is stored in the image.
 
 Queries use bidirectional Dijkstra with uint64 distances and monotone radix heaps.
-Four workers claim queries from an atomic counter. Each worker packs exact
-distances and generation tags into one word per direction and node; the bit width
-is derived from the maximum simple-path sum and tag wrap clears state. The smaller search frontier is expanded; termination
+Twelve workers claim queries from an atomic counter. Each worker keeps an exact
+flat hash table of visited nodes in each direction. Generation tags clear a
+query logically, and the tables grow when needed. State therefore follows the
+largest search handled by a worker rather than the full graph. Collisions compare
+node IDs, and distances remain uint64 values. The smaller frontier is expanded; termination
 requires the two heap minima to reach the best complete path found. Results
 are written after joining workers, in original query order.
 
@@ -18,5 +20,5 @@ no special assumptions. SD_THREADS may select 1 to 12 workers for experiments.
 
 No external dependencies. Optional arguments select input and output directories.
 
-With another 24 hours: reorder vertices to improve cache locality and parallelize
-graph construction. Measure complete time and memory, including preprocessing.
+With another 24 hours: reduce graph-construction memory and improve query-state
+cache locality. Measure complete time and memory, including preprocessing.

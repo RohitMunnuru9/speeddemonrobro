@@ -33,3 +33,14 @@ T=0.099913 s, M=53,575,680 bytes, S=300, K=18.600802, points=63.476583.
 This is 7.03x faster than the first board baseline. The current build adds LTO
 and profile guidance from a build-time seed-17 sample. Full seeds 1/2 still pass;
 the profile-guided candidate awaits its own board measurement.
+
+PGO receipt for dde1d70: run-d09c4f1336cc, all gates passed,
+T=0.107640 s, M=53,399,552 bytes, S=306, K=17.879354, points=62.617591.
+This trial regressed against cf4fee3; compiler guidance alone was not a speed win.
+
+Next candidate: lazily allocate per-hour counter arrays, intern endpoint names
+before sorting, and prepare endpoint references/prefix ranges in parallel.
+Twelve workers are selected for the scoring machine. Native full-seed-1 runs
+were approximately 0.11-0.18 s with about 279 MB RSS including mapped input.
+Full seeds 1/2 pass. SIMD space scanning was correct but had only a marginal
+local effect and was omitted. Official measurement of this layout is pending.

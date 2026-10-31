@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <string_view>
@@ -57,19 +58,30 @@ struct Index {
 };
 struct Endpoint {
   std::string_view name;
-  std::array<uint32_t, hours> count{}, errors{}, cursor{};
+};
+struct Group {
+  uint32_t count = 0, errors = 0, cursor = 0;
 };
 struct Worker {
   Index index;
   std::vector<Endpoint> endpoints;
+  std::array<std::vector<Group>, hours> groups;
   std::vector<std::pair<uint32_t, uint32_t>> records;
+  Group &group(size_t id, size_t hour) {
+    auto &bucket = groups[hour];
+    if (id >= bucket.size())
+      bucket.resize(std::max<size_t>(2048, id * 2 + 1));
+    return bucket[id];
+  }
 };
 int main(int argc, char **argv) {
   try {
     std::string data = argc > 1 ? argv[1] : "/data",
                 out = argc > 2 ? argv[2] : "/out";
     Mapping input(data + "/requests.log");
-    const size_t workers = input.size > 1000000 ? 6 : 1;
+    size_t workers = input.size > 1000000 ? 12 : 1;
+    if (const char *env = std::getenv("SD_THREADS"))
+      workers = std::clamp(std::atoi(env), 1, 12);
     std::vector<const char *> boundary(workers + 1, input.data + input.size);
     boundary[0] = input.data;
     for (size_t i = 1; i < workers; ++i) {
@@ -83,6 +95,7 @@ int main(int argc, char **argv) {
     // global ranges, each worker scatters its records without hashing again.
     auto scan = [&](size_t thread) {
       auto &w = local[thread];
+      w.endpoints.reserve(2048);
       w.records.reserve((boundary[thread + 1] - boundary[thread]) / 64);
       const char *p = boundary[thread];
       while (p < boundary[thread + 1]) {
@@ -101,13 +114,13 @@ int main(int argc, char **argv) {
           w.endpoints.back().name = name;
         }
         id = found;
-        auto &group = w.endpoints[id];
+        auto &group = w.group(id, hour);
         bool error = p[1] == '5';
         p += 5;
         uint32_t latency = number(p);
         ++p;
-        ++group.count[hour];
-        group.errors[hour] += error;
+        ++group.count;
+        group.errors += error;
         w.records.emplace_back(latency, id * hours + hour);
       }
     };
@@ -115,43 +128,67 @@ int main(int argc, char **argv) {
     parallel(workers, scan);
     // PROFILE_PARSE_DONE
     std::vector<std::string_view> names;
+    Index combined;
     for (auto &w : local)
       for (auto &e : w.endpoints)
-        names.push_back(e.name);
+        if (combined.get(e.name, 0, true).second)
+          names.push_back(e.name);
     std::sort(names.begin(), names.end());
-    names.erase(std::unique(names.begin(), names.end()), names.end());
     // Resolve endpoint IDs once, rather than hashing the same name for all 72
     // hours.
-    std::vector<std::array<Endpoint *, 6>> references(names.size());
-    for (size_t e = 0; e < names.size(); ++e)
-      for (size_t t = 0; t < workers; ++t) {
-        auto id = local[t].index.get(names[e], 0, false).first;
-        if (id != UINT32_MAX)
-          references[e][t] = &local[t].endpoints[id];
-      }
+    std::vector<std::array<uint32_t, 12>> references(names.size());
+    for (auto &ids : references)
+      ids.fill(UINT32_MAX);
+    parallel(workers, [&](size_t worker) {
+      for (size_t e = worker; e < names.size(); e += workers)
+        for (size_t t = 0; t < workers; ++t) {
+          auto id = local[t].index.get(names[e], 0, false).first;
+          if (id != UINT32_MAX)
+            references[e][t] = id;
+        }
+    });
     const size_t groups = names.size() * hours;
     std::vector<uint32_t> offsets(groups + 1), errors(groups);
-    uint32_t total = 0;
-    for (size_t h = 0; h < hours; ++h)
-      for (size_t e = 0; e < names.size(); ++e) {
-        size_t g = h * names.size() + e;
-        offsets[g] = total;
-        for (size_t t = 0; t < workers; ++t) {
-          if (!references[e][t])
-            continue;
-          auto &endpoint = *references[e][t];
-          endpoint.cursor[h] = total;
-          total += endpoint.count[h];
-          errors[g] += endpoint.errors[h];
+    parallel(workers, [&](size_t worker) {
+      for (size_t e = names.size() * worker / workers;
+           e < names.size() * (worker + 1) / workers; ++e)
+        for (size_t h = 0; h < hours; ++h) {
+          size_t g = h * names.size() + e;
+          for (size_t t = 0; t < workers; ++t) {
+            if (references[e][t] >= local[t].groups[h].size())
+              continue;
+            const auto &group = local[t].groups[h][references[e][t]];
+            offsets[g] += group.count;
+            errors[g] += group.errors;
+          }
         }
-      }
+    });
+    uint32_t total = 0;
+    for (size_t g = 0; g < groups; ++g) {
+      uint32_t count = offsets[g];
+      offsets[g] = total;
+      total += count;
+    }
     offsets[groups] = total;
+    parallel(workers, [&](size_t worker) {
+      for (size_t e = names.size() * worker / workers;
+           e < names.size() * (worker + 1) / workers; ++e)
+        for (size_t h = 0; h < hours; ++h) {
+          uint32_t cursor = offsets[h * names.size() + e];
+          for (size_t t = 0; t < workers; ++t)
+            if (references[e][t] < local[t].groups[h].size()) {
+              auto &group = local[t].groups[h][references[e][t]];
+              group.cursor = cursor;
+              cursor += group.count;
+            }
+        }
+    });
     values.resize(total);
     // PROFILE_MERGE_DONE
     parallel(workers, [&](size_t t) {
       auto &w = local[t];
       for (auto [latency, group] : w.records)
-        values[w.endpoints[group / hours].cursor[group % hours]++] = latency;
+        values[w.groups[group % hours][group / hours].cursor++] = latency;
     });
     std::vector<Worker>().swap(local);
     // PROFILE_SCATTER_DONE

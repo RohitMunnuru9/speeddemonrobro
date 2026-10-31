@@ -50,6 +50,60 @@ struct RadixHeap {
     last = 0;
   }
 };
+// The state grows with nodes visited by a query, rather than every graph node.
+struct SearchState {
+  struct Entry {
+    uint64_t distance = UINT64_MAX;
+    uint32_t node = 0, epoch = 0;
+  };
+  std::vector<Entry> entries = std::vector<Entry>(1024);
+  uint32_t epoch = 0;
+  size_t used = 0;
+  static size_t hash(uint32_t node) {
+    uint64_t h = node * 0x9e3779b97f4a7c15ULL;
+    return h ^ (h >> 32);
+  }
+  void clear() {
+    used = 0;
+    if (++epoch == 0) {
+      for (auto &entry : entries)
+        entry.epoch = 0;
+      epoch = 1;
+    }
+  }
+  uint64_t get(uint32_t node) const {
+    size_t slot = hash(node) & (entries.size() - 1);
+    while (entries[slot].epoch == epoch) {
+      if (entries[slot].node == node)
+        return entries[slot].distance;
+      slot = (slot + 1) & (entries.size() - 1);
+    }
+    return UINT64_MAX;
+  }
+  bool relax(uint32_t node, uint64_t distance) {
+    if ((used + 1) * 4 > entries.size() * 3) {
+      auto old = std::move(entries);
+      entries.resize(old.size() * 2);
+      used = 0;
+      for (const auto &entry : old)
+        if (entry.epoch == epoch)
+          relax(entry.node, entry.distance);
+    }
+    size_t slot = hash(node) & (entries.size() - 1);
+    while (entries[slot].epoch == epoch && entries[slot].node != node)
+      slot = (slot + 1) & (entries.size() - 1);
+    auto &entry = entries[slot];
+    if (entry.epoch != epoch) {
+      entry = {distance, node, epoch};
+      ++used;
+      return true;
+    }
+    if (distance >= entry.distance)
+      return false;
+    entry.distance = distance;
+    return true;
+  }
+};
 struct Edge {
   uint32_t v, w;
 };
@@ -161,17 +215,8 @@ int main(int argc, char **argv) {
     if (const char *env = std::getenv("SD_THREADS"))
       workers = std::clamp(std::atoi(env), 1, 12);
     parallel(workers, [&](size_t) {
-      // A simple path has at most n-1 uint32 edges. The published full graph
-      // therefore needs 53 distance bits, leaving 11 generation bits. Pack both
-      // into one word instead of touching a second generation array per node.
-      unsigned bits = std::max(1, std::bit_width(uint64_t(n - 1) * UINT32_MAX));
-      if (bits >= 64)
-        throw std::runtime_error("distance packing limit exceeded");
-      uint64_t mask = (uint64_t{1} << bits) - 1;
-      std::array<std::vector<uint64_t>, 2> state{std::vector<uint64_t>(n),
-                                                 std::vector<uint64_t>(n)};
+      std::array<SearchState, 2> state;
       std::array<RadixHeap, 2> heap;
-      uint64_t epoch = 0;
       for (;;) {
         size_t i = next.fetch_add(1);
         if (i >= queries.size())
@@ -184,16 +229,12 @@ int main(int argc, char **argv) {
         if (offsets[0][s] == offsets[0][s + 1] ||
             offsets[1][t] == offsets[1][t + 1])
           continue;
-        if (++epoch == (uint64_t{1} << (64 - bits))) {
-          for (auto &array : state)
-            std::fill(array.begin(), array.end(), 0);
-          epoch = 1;
-        }
-        uint64_t tag = epoch << bits;
+        state[0].clear();
+        state[1].clear();
         heap[0].clear();
         heap[1].clear();
-        state[0][s] = tag;
-        state[1][t] = tag;
+        state[0].relax(s, 0);
+        state[1].relax(t, 0);
         heap[0].push(0, s);
         heap[1].push(0, t);
         uint64_t best = UINT64_MAX;
@@ -206,19 +247,17 @@ int main(int argc, char **argv) {
           unsigned side = heap[0].count <= heap[1].count ? 0 : 1,
                    other = side ^ 1;
           auto [d, u] = heap[side].pop();
-          if (d != (state[side][u] & mask))
+          if (d != state[side].get(u))
             continue;
-          if ((state[other][u] & ~mask) == tag)
-            best = std::min(best, d + (state[other][u] & mask));
+          if (auto opposite = state[other].get(u); opposite != UINT64_MAX)
+            best = std::min(best, d + opposite);
           for (uint32_t e = offsets[side][u]; e < offsets[side][u + 1]; ++e) {
             auto [v, w] = edges[side][e];
             uint64_t nd = d + w;
-            if ((state[side][v] & ~mask) != tag ||
-                nd < (state[side][v] & mask)) {
-              state[side][v] = tag | nd;
+            if (state[side].relax(v, nd)) {
               heap[side].push(nd, v);
-              if ((state[other][v] & ~mask) == tag)
-                best = std::min(best, nd + (state[other][v] & mask));
+              if (auto opposite = state[other].get(v); opposite != UINT64_MAX)
+                best = std::min(best, nd + opposite);
             }
           }
         }

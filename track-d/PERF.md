@@ -134,3 +134,18 @@ tuning gave median 0.5981 s against 0.6385 s for the prior source (about 6.3%
 lower). Further packed-arc and membership-filter variants did not establish
 a sufficient gain and were not selected. Both public full hashes and
 tiny/sample seeds 1/2 pass. Official measurement is pending.
+
+Combined-label receipt for 4539ae4: run-044bd9c8969e, all gates passed,
+T=0.315156 s, M=128,053,248 bytes, S=447, K=15.763062, points=59.882029.
+The smaller build peak did not offset slower search. The combined table is
+rejected in favor of the previous two directional tables.
+
+Next candidate retains the 5% reserve slack and adds an exact membership filter
+only before opposite-direction lookups. Filter collisions always fall through
+to full node/distance checks. A bitmask tracks occupied positive radix buckets,
+so finding the next bucket uses a trailing-zero operation instead of a scan.
+Distances remain uint64 and search/termination policy remains unchanged.
+Three alternating local runs gave median 0.9108 s against 1.0280 s for the prior
+best source (about 11.4% lower). Official measurement remains pending.
+Both full public seeds, the full independent seed 17, the sealed Docker run,
+and 9,000 independent arbitrary-graph answers pass for this candidate.

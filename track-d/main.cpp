@@ -16,24 +16,31 @@ struct RadixHeap {
   std::array<std::vector<Item>, 65> buckets;
   uint64_t last = 0;
   size_t count = 0;
+  uint64_t active = 0;
   static unsigned bucket(uint64_t difference) {
     return difference ? 64 - __builtin_clzll(difference) : 0;
   }
   void push(uint64_t key, uint32_t node) {
-    buckets[bucket(last ^ key)].emplace_back(key, node);
+    unsigned b = bucket(last ^ key);
+    buckets[b].emplace_back(key, node);
+    if (b)
+      active |= uint64_t{1} << (b - 1);
     ++count;
   }
   uint64_t minimum() {
     if (buckets[0].empty()) {
-      unsigned b = 1;
-      while (buckets[b].empty())
-        ++b;
+      unsigned b = std::countr_zero(active) + 1;
       last = UINT64_MAX;
       for (auto item : buckets[b])
         last = std::min(last, item.first);
-      for (auto item : buckets[b])
-        buckets[bucket(last ^ item.first)].push_back(item);
+      for (auto item : buckets[b]) {
+        unsigned dest = bucket(last ^ item.first);
+        buckets[dest].push_back(item);
+        if (dest)
+          active |= uint64_t{1} << (dest - 1);
+      }
       buckets[b].clear();
+      active &= ~(uint64_t{1} << (b - 1));
     }
     return last;
   }
@@ -49,15 +56,22 @@ struct RadixHeap {
       bucket.clear();
     count = 0;
     last = 0;
+    active = 0;
   }
 };
 // The state grows with nodes visited by a query, rather than every graph node.
 struct SearchState {
   struct Entry {
-    std::array<uint64_t, 2> distance{UINT64_MAX, UINT64_MAX};
+    uint64_t distance = UINT64_MAX;
     uint32_t node = 0, epoch = 0;
   };
   std::vector<Entry> entries = std::vector<Entry>(1024);
+  std::array<uint64_t, 1024> filter{};
+  uint64_t cross(uint32_t node) const {
+    if (!(filter[(node >> 6) & 1023] & (uint64_t{1} << (node & 63))))
+      return UINT64_MAX;
+    return get(node);
+  }
   uint32_t epoch = 0;
   size_t used = 0;
   static size_t hash(uint32_t node) {
@@ -66,48 +80,45 @@ struct SearchState {
   }
   void clear() {
     used = 0;
+    filter.fill(0);
     if (++epoch == 0) {
       for (auto &entry : entries)
         entry.epoch = 0;
       epoch = 1;
     }
   }
-  std::array<uint64_t, 2> get(uint32_t node) const {
+  uint64_t get(uint32_t node) const {
     size_t slot = hash(node) & (entries.size() - 1);
     while (entries[slot].epoch == epoch) {
       if (entries[slot].node == node)
         return entries[slot].distance;
       slot = (slot + 1) & (entries.size() - 1);
     }
-    return {UINT64_MAX, UINT64_MAX};
+    return UINT64_MAX;
   }
-  std::pair<bool, uint64_t> relax(unsigned side, uint32_t node,
-                                  uint64_t value) {
+  bool relax(uint32_t node, uint64_t distance) {
     if ((used + 1) * 4 > entries.size() * 3) {
       auto old = std::move(entries);
       entries.resize(old.size() * 2);
       used = 0;
       for (const auto &entry : old)
-        if (entry.epoch == epoch) {
-          size_t slot = hash(entry.node) & (entries.size() - 1);
-          while (entries[slot].epoch == epoch)
-            slot = (slot + 1) & (entries.size() - 1);
-          entries[slot] = entry;
-          ++used;
-        }
+        if (entry.epoch == epoch)
+          relax(entry.node, entry.distance);
     }
     size_t slot = hash(node) & (entries.size() - 1);
     while (entries[slot].epoch == epoch && entries[slot].node != node)
       slot = (slot + 1) & (entries.size() - 1);
     auto &entry = entries[slot];
     if (entry.epoch != epoch) {
-      entry = {{UINT64_MAX, UINT64_MAX}, node, epoch};
+      filter[(node >> 6) & 1023] |= uint64_t{1} << (node & 63);
+      entry = {distance, node, epoch};
       ++used;
+      return true;
     }
-    if (value >= entry.distance[side])
-      return {false, entry.distance[side ^ 1]};
-    entry.distance[side] = value;
-    return {true, entry.distance[side ^ 1]};
+    if (distance >= entry.distance)
+      return false;
+    entry.distance = distance;
+    return true;
   }
 };
 struct Edge {
@@ -295,7 +306,7 @@ int main(int argc, char **argv) {
     if (const char *env = std::getenv("SD_THREADS"))
       workers = std::clamp(std::atoi(env), 1, 12);
     parallel(workers, [&](size_t) {
-      SearchState state;
+      std::array<SearchState, 2> state;
       std::array<RadixHeap, 2> heap;
       for (;;) {
         size_t i = next.fetch_add(1);
@@ -309,11 +320,12 @@ int main(int argc, char **argv) {
         if (offsets[0][s] == offsets[0][s + 1] ||
             offsets[1][t] == offsets[1][t + 1])
           continue;
-        state.clear();
+        state[0].clear();
+        state[1].clear();
         heap[0].clear();
         heap[1].clear();
-        state.relax(0, s, 0);
-        state.relax(1, t, 0);
+        state[0].relax(s, 0);
+        state[1].relax(t, 0);
         heap[0].push(0, s);
         heap[1].push(0, t);
         uint64_t best = UINT64_MAX;
@@ -326,18 +338,16 @@ int main(int argc, char **argv) {
           unsigned side = heap[0].count <= heap[1].count ? 0 : 1,
                    other = side ^ 1;
           auto [d, u] = heap[side].pop();
-          auto distances = state.get(u);
-          if (d != distances[side])
+          if (d != state[side].get(u))
             continue;
-          if (auto opposite = distances[other]; opposite != UINT64_MAX)
+          if (auto opposite = state[other].cross(u); opposite != UINT64_MAX)
             best = std::min(best, d + opposite);
           for (uint32_t e = offsets[side][u]; e < offsets[side][u + 1]; ++e) {
             auto [v, w] = decode(side, edges[side][e]);
             uint64_t nd = d + w;
-            auto [changed, opposite] = state.relax(side, v, nd);
-            if (changed) {
+            if (state[side].relax(v, nd)) {
               heap[side].push(nd, v);
-              if (opposite != UINT64_MAX)
+              if (auto opposite = state[other].cross(v); opposite != UINT64_MAX)
                 best = std::min(best, nd + opposite);
             }
           }

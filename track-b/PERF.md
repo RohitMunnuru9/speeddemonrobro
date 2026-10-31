@@ -71,3 +71,8 @@ Three warm alternating native runs before the document-scan change gave median
 0.8010 s against 0.8548 s for the prior source (about 6.3% lower). A larger hot
 cache was not faster and was rejected. Public full output and tiny/sample seeds
 1/2 remain byte-exact. Official time, memory and source tradeoff is pending.
+
+Receipt for 4539ae4: run-5c282078959e, all gates passed,
+T=0.451909 s, M=137,101,312 bytes, S=866, K=13.875027, points=57.111692.
+This is 19.5% faster than the previous best practice run, and gains 2.20 points.
+The full independent seed-17 reference also matches exactly.

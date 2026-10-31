@@ -107,3 +107,17 @@ over 31 bytes still use the exact map; key length tags and country masks are
 unchanged. Three alternating native runs gave median 0.09837 s against
 0.11004 s for the previous source (about 10.6% lower). Both full public hashes
 and tiny/sample seeds 1/2 pass. Official measurement is pending.
+
+Receipt for 4539ae4: run-65df252c3dda, all gates passed,
+T=0.058859 s, M=13,762,560 bytes, S=365, K=25.171220, points=70.045213.
+This improves the prior best 69.772236 points. The full independent seed-17
+reference and concurrent/CSV edge cases also match exactly.
+
+Deferred layout trial splits each 64-byte key/mask slot into a 32-byte key and a
+separate 32-byte mask. Total reserved bytes stay the same; membership atomics
+no longer invalidate the key bytes in other workers' caches. Three alternating
+native runs gave median 0.12268 s versus 0.12706 s (about 3.4% lower). This small
+local difference requires an official comparison; exact key publication and
+membership semantics are unchanged.
+This experiment is not submitted; the best scored layout is retained while
+work prioritizes B and D.

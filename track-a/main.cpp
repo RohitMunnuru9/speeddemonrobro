@@ -1,59 +1,109 @@
+#include "io.hpp"
 #include <algorithm>
 #include <array>
-#include <cstdint>
-#include <cstdio>
+#include <atomic>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
-#include <iterator>
-#include <string>
 #include <string_view>
 #include <unordered_map>
-#include <vector>
-
-struct Group { std::vector<uint32_t> values; uint32_t errors = 0; };
+constexpr size_t hours = 72;
+struct Endpoint {
+  std::string_view name;
+  std::array<uint32_t, hours> count{}, errors{}, cursor{};
+};
+struct Worker {
+  std::unordered_map<std::string_view, uint32_t> index;
+  std::vector<Endpoint> endpoints;
+  std::vector<std::pair<uint32_t, uint32_t>> records;
+};
 int main(int argc, char **argv) {
   try {
-    const std::string data = argc > 1 ? argv[1] : "/data";
-    const std::string out = argc > 2 ? argv[2] : "/out";
-    std::ifstream f(data + "/requests.log", std::ios::binary);
-    if (!f) throw std::runtime_error("cannot open requests.log");
-    std::unordered_map<std::string, std::array<Group, 72>> groups;
-    groups.reserve(2048);
-    std::string line;
-    while (std::getline(f, line)) {
-      // Only the date and hour affect the key; fractional seconds are irrelevant.
-      const int day = line[6] == '0' ? (line[9] == '0' ? 0 : 1) : line[9] - '0' + 1;
-      const int hour = day * 24 + (line[11] - '0') * 10 + line[12] - '0' - 18;
-      const auto begin = line.find(' ', 28) + 1;
-      const auto end = line.find(' ', begin);
-      auto &g = groups[line.substr(begin, end - begin)][hour];
-      g.errors += line[end + 1] == '5';
-      uint32_t latency = 0;
-      for (size_t p = end + 5; p < line.size(); ++p) latency = latency * 10 + line[p] - '0';
-      g.values.push_back(latency);
+    std::string data = argc > 1 ? argv[1] : "/data", out = argc > 2 ? argv[2] : "/out";
+    Mapping input(data + "/requests.log");
+    const size_t workers = input.size > 1000000 ? 6 : 1;
+    std::vector<const char *> boundary(workers + 1, input.data + input.size);
+    boundary[0] = input.data;
+    for (size_t i = 1; i < workers; ++i) {
+      const char *p = input.data + input.size * i / workers;
+      while (p < input.data + input.size && *p++ != '\n') {}
+      boundary[i] = p;
     }
-    std::vector<std::string> endpoints;
-    for (const auto &[key, unused] : groups) endpoints.push_back(key);
-    std::sort(endpoints.begin(), endpoints.end());
-    std::filesystem::create_directories(out);
-    std::ofstream result(out + "/summary.txt", std::ios::binary);
-    if (!result) throw std::runtime_error("cannot open output");
-    for (int h = 0; h < 72; ++h) {
-      const int absolute = h + 18, day = absolute / 24, hour = absolute % 24;
-      char timestamp[32];
-      std::snprintf(timestamp, sizeof(timestamp), "2026-%02d-%02dT%02d:00:00Z", day < 2 ? 10 : 11, day < 2 ? 30 + day : day - 1, hour);
-      for (const auto &endpoint : endpoints) {
-        auto &g = groups.at(endpoint)[h];
-        auto &v = g.values;
-        if (v.empty()) continue;
-        std::sort(v.begin(), v.end());
-        const uint64_t n = v.size();
-        result << timestamp << ' ' << endpoint << ' ' << n;
-        for (int p : {50, 95, 99}) result << ' ' << v[(p * n + 99) / 100 - 1];
-        result << ' ' << g.errors << ' ' << uint64_t(g.errors) * 1000000 / n << '\n';
+    std::vector<Worker> local(workers);
+    // Parse once into compact (latency, local group) records. After assigning
+    // global ranges, each worker scatters its records without hashing again.
+    auto scan = [&](size_t thread) {
+      auto &w = local[thread]; w.index.reserve(2048);
+      w.records.reserve((boundary[thread + 1] - boundary[thread]) / 64);
+      const char *p = boundary[thread];
+      while (p < boundary[thread + 1]) {
+        const int day = p[6] == '0' ? p[9] - '0' : p[9] - '0' + 1;
+        const int hour = day * 24 + (p[11] - '0') * 10 + p[12] - '0' - 18;
+        p += 28; while (*p++ != ' ') {}
+        const char *start = p; while (*p != ' ') ++p;
+        std::string_view name(start, p - start); uint32_t id;
+          auto it = w.index.find(name);
+          if (it == w.index.end()) {
+            it = w.index.emplace(name, w.endpoints.size()).first;
+            w.endpoints.emplace_back(); w.endpoints.back().name = name;
+          }
+          id = it->second;
+        auto &group = w.endpoints[id]; bool error = p[1] == '5';
+        p += 5; uint32_t latency = number(p); ++p;
+        ++group.count[hour]; group.errors[hour] += error;
+        w.records.emplace_back(latency, id * hours + hour);
+      }
+    };
+    std::vector<uint32_t> values;
+    parallel(workers, scan);
+    std::vector<std::string_view> names;
+    for (auto &w : local) for (auto &e : w.endpoints) names.push_back(e.name);
+    std::sort(names.begin(), names.end()); names.erase(std::unique(names.begin(), names.end()), names.end());
+    const size_t groups = names.size() * hours;
+    std::vector<uint32_t> offsets(groups + 1), errors(groups); uint32_t total = 0;
+    for (size_t h = 0; h < hours; ++h) for (size_t e = 0; e < names.size(); ++e) {
+      size_t g = h * names.size() + e; offsets[g] = total;
+      for (auto &w : local) {
+        auto it = w.index.find(names[e]); if (it == w.index.end()) continue;
+        auto &endpoint = w.endpoints[it->second]; endpoint.cursor[h] = total;
+        total += endpoint.count[h]; errors[g] += endpoint.errors[h];
       }
     }
-    if (!result) throw std::runtime_error("output write failed");
+    offsets[groups] = total; values.resize(total);
+    parallel(workers, [&](size_t t) {
+      auto &w = local[t];
+      for (auto [latency, group] : w.records) values[w.endpoints[group / hours].cursor[group % hours]++] = latency;
+    });
+    std::vector<Worker>().swap(local);
+    std::vector<std::string> output(hours); std::atomic<size_t> next{0};
+    parallel(workers, [&](size_t) {
+      for (;;) {
+        size_t h = next.fetch_add(1); if (h >= hours) break;
+        auto &text = output[h]; text.reserve(160000);
+        const int absolute = h + 18, day = absolute / 24; char timestamp[32];
+        std::snprintf(timestamp, sizeof(timestamp), "2026-%02d-%02dT%02d:00:00Z", day < 2 ? 10 : 11, day < 2 ? 30 + day : day - 1, absolute % 24);
+        for (size_t e = 0; e < names.size(); ++e) {
+          size_t g = h * names.size() + e;
+          uint32_t n = offsets[g + 1] - offsets[g]; if (!n) continue;
+          auto first = values.begin() + offsets[g], last = first + n;
+          std::array<uint32_t, 3> quantiles;
+          if (n < 32) {
+            std::sort(first, last);
+            for (size_t k = 0; k < 3; ++k) quantiles[k] = first[(std::array{50,95,99}[k] * uint64_t(n) + 99) / 100 - 1];
+          } else {
+            auto start = first;
+            for (size_t k = 0; k < 3; ++k) {
+              auto rank = first + (std::array{50,95,99}[k] * uint64_t(n) + 99) / 100 - 1;
+              std::nth_element(start, rank, last); quantiles[k] = *rank; start = rank;
+            }
+          }
+          text += timestamp; text += ' '; text += names[e]; text += ' '; append(text, n);
+          for (auto q : quantiles) { text += ' '; append(text, q); }
+          text += ' '; append(text, errors[g]); text += ' '; append(text, uint64_t(errors[g]) * 1000000 / n); text += '\n';
+        }
+      }
+    });
+    std::filesystem::create_directories(out);
+    std::string joined; joined.reserve(11000000); for (auto &part : output) joined += part;
+    write_file(out + "/summary.txt", joined);
   } catch (const std::exception &e) { std::cerr << e.what() << '\n'; return 1; }
 }

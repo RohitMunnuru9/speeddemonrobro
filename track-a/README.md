@@ -1,18 +1,18 @@
 # A: Ingest
 
-The input is parsed one record at a time. The fixed UTC span maps into 72 hour
-buckets, so parsing seconds and fractional seconds would do no useful work.
-Endpoints are interned by an exact string map. Each endpoint owns 72 groups of
-uint32 latencies and an error counter. Methods do not affect the answer.
+Six workers parse disjoint line-aligned ranges of read-only mapped input.
+The fixed UTC span maps into 72 hour buckets. Endpoints are exact string views,
+so parsing creates no endpoint strings per record. Each worker stores compact
+latency/group pairs and counts; the counts assign disjoint ranges in one shared
+latency array. A scatter phase groups values without a second parsing pass.
 
-Each group's latencies are sorted and the three nearest ranks are read using
-integer arithmetic. Endpoints are sorted bytewise and output is emitted in hour
-order. Duplicate records count separately. The memory used by latency vectors
-is proportional to the input record count, rather than the latency range.
+Small groups are sorted; larger groups use exact selection at the three nearest
+ranks. Output hours are formatted independently into buffers and joined in order.
+Endpoints sort bytewise. Duplicate records count separately; all ranks and rates
+use integer arithmetic.
 
 No external dependencies. Build and run the Dockerfile; optional command line
 arguments select the input and output directories for local verification.
 
-With another 24 hours: compare selection against sorting for large groups,
-remove repeated endpoint allocations, and test independent parsing workers.
-Retain changes only when organizer measurements improve K.
+With another 24 hours: compare compact hash tables and vectorized parsing, then
+reduce temporary buffer memory. Retain changes only when board K improves.

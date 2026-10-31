@@ -11,3 +11,9 @@ First board baseline: `run-9b28b732aad3`, commit
 All gates passed. T = 0.702697 s, M = 34,725,888 bytes, S = 80, D = 1,
 K = 9.326661, machine points = 48.486309. This is one practice-board run,
 not the final five-run holdout result. No board-measured earlier version exists.
+
+Next candidate: mapped input, six parsing workers, compact records, one contiguous
+latency array, exact selection and buffered parallel formatting. Full-size seeds
+1 and 2 match the reference. Local full-seed-1 runtime is about 0.25-0.40 s on
+the native WSL filesystem; these timings are not the scoring machine. Board
+measurement pending; compare against run-9b28b732aad3.

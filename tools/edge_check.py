@@ -29,6 +29,13 @@ check("a", {"requests.log": ""}, "")
 check("a", {"requests.log": a.edge_input()}, a.run_reference(a.edge_input()))
 check("c", {"records.csv": c.WORKED_RECORDS, "regions.csv": c.WORKED_REGIONS}, c.WORKED_OUTPUT)
 check("c", {"records.csv": c.RULES_RECORDS, "regions.csv": c.RULES_REGIONS}, c.RULES_OUTPUT)
+# Cross-thread duplicates exercise the shared exact membership table and mixed
+# LF/CRLF chunk boundaries, with quote escapes and both empty-name encodings.
+records = b'id,name,note,region_id,amount\r\n' + b''.join(
+    str(i + 1).encode() + b',' + [b'"Ann ""A"""', b'""', b''][i % 3] + b',"a\nb",7,-0.01' + (b'\r\n' if i % 2 else b'\n')
+    for i in range(60000))
+regions = b'region_id,country\n7,AAA\n'
+check("c", {"records.csv": records, "regions.csv": regions}, c.run_reference(records, regions))
 for threads in (1, 6, 12):
     check("d", {"graph.txt": d.EXAMPLE_GRAPH, "queries.txt": d.EXAMPLE_QUERIES}, d.EXAMPLE_OUTPUT, threads)
 # Bellman-Ford is an independent oracle and does not depend on the event's

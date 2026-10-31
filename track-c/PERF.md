@@ -20,3 +20,9 @@ All gates passed. T = 0.972772 s, M = 14,352,384 bytes, S = 188, D = 1,
 K = 6.782354, machine points = 41.569023. This is one practice-board run,
 not the final five-run holdout result. The local RSS numbers above include
 mapped input pages; the board's cgroup memory measurement is the scoring axis.
+
+Next candidate: six CSV workers, allocation-free field views, and one shared exact
+name table with atomic membership bits. Tested with full seeds 1 and 2 and a
+60,000-record duplicate-name stress case spanning all workers. Local full-seed-1
+runtime is about 0.32-0.40 s, versus roughly 2.35 s for the prior implementation
+on native WSL storage. Board measurement pending; compare against run-ca1317b2135c.

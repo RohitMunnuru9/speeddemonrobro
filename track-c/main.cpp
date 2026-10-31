@@ -1,122 +1,151 @@
+#include "io.hpp"
 #include <algorithm>
 #include <array>
-#include <cstdint>
+#include <atomic>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <limits>
-#include <map>
-#include <string>
+#include <memory>
+#include <mutex>
+#include <string_view>
 #include <unordered_map>
-#include <vector>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-struct MappedFile {
-  const char *data; size_t size;
-  explicit MappedFile(const std::string &path) {
-    int fd = open(path.c_str(), O_RDONLY);
-    if (fd < 0) throw std::runtime_error("cannot open records.csv");
-    struct stat st{};
-    if (fstat(fd, &st) != 0 || st.st_size == 0) { close(fd); throw std::runtime_error("empty or unreadable CSV"); }
-    size = st.st_size;
-    void *mapped = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (mapped == MAP_FAILED) throw std::runtime_error("cannot map records.csv");
-    data = static_cast<const char *>(mapped);
-  }
-  ~MappedFile() { munmap(const_cast<char *>(data), size); }
-};
 
 struct Country {
-  uint64_t count = 0, ids = 0, name_bytes = 0, note_bytes = 0;
+  uint64_t count = 0, ids = 0, name_bytes = 0, note_bytes = 0, names = 0;
   int64_t sum = 0, lo = INT64_MAX, hi = INT64_MIN;
-  uint64_t names = 0;
 };
-std::string money(int64_t n) {
-  std::string sign = n < 0 ? "-" : "";
-  uint64_t a = n < 0 ? -n : n;
-  return sign + std::to_string(a / 100) + "." + char('0' + a / 10 % 10) + char('0' + a % 10);
+struct Name {
+  std::string_view text;
+  std::array<std::atomic<uint64_t>, 4> countries{};
+  std::atomic<uint64_t> hash{0};
+};
+// Collision checks always compare the actual bytes; hashes are not identities.
+struct NameTable {
+  size_t capacity;
+  std::unique_ptr<Name[]> entries;
+  std::mutex mutex;
+  std::unordered_map<std::string_view, std::array<uint64_t, 4>> overflow;
+  explicit NameTable(size_t size) : capacity(size), entries(std::make_unique<Name[]>(size)) {}
+  bool mark(std::string_view text, size_t country) {
+    uint64_t hash = std::hash<std::string_view>{}(text) | 2;
+    size_t slot = hash & (capacity - 1);
+    uint64_t bit = uint64_t{1} << (country % 64);
+    for (size_t probe = 0; probe < 128; ++probe) {
+      auto &entry = entries[slot];
+      uint64_t present = entry.hash.load(std::memory_order_acquire);
+      if (!present && entry.hash.compare_exchange_strong(present, 1, std::memory_order_acq_rel)) {
+        entry.text = text;
+        entry.hash.store(hash, std::memory_order_release); present = hash;
+      }
+      while (present == 1) present = entry.hash.load(std::memory_order_acquire);
+      if (present == hash && entry.text == text)
+        return !(entry.countries[country / 64].fetch_or(bit, std::memory_order_relaxed) & bit);
+      slot = (slot + 1) & (capacity - 1);
+    }
+    // Unbounded exact fallback for unusually large/skewed vocabularies. Slots
+    // are never removed, so a name that overflows follows this path thereafter.
+    std::lock_guard lock(mutex);
+    auto &word = overflow[text][country / 64];
+    bool added = !(word & bit); word |= bit; return added;
+  }
+};
+struct Field { std::string_view bytes; size_t length; };
+Field field(const char *&p, const char *end) {
+  const char *start = p; size_t escapes = 0;
+  if (*p == '"') {
+    start = ++p;
+    for (;;) {
+      const char *quote = static_cast<const char *>(memchr(p, '"', end - p));
+      if (!quote) throw std::runtime_error("unterminated quote");
+      p = quote + 1;
+      if (p == end || *p != '"') return {{start, size_t(quote - start)}, size_t(quote - start) - escapes};
+      ++p; ++escapes;
+    }
+  }
+  while (p < end && *p != ',' && *p != '\r' && *p != '\n') ++p;
+  return {{start, size_t(p - start)}, size_t(p - start)};
+}
+void money(std::string &out, int64_t value) {
+  if (value < 0) { out += '-'; value = -value; }
+  append(out, value / 100); out += '.';
+  out += char('0' + value / 10 % 10); out += char('0' + value % 10);
 }
 int main(int argc, char **argv) {
   try {
-    const std::string data = argc > 1 ? argv[1] : "/data", out = argc > 2 ? argv[2] : "/out";
-    std::ifstream lookup(data + "/regions.csv", std::ios::binary);
-    if (!lookup) throw std::runtime_error("cannot open regions.csv");
+    std::string data = argc > 1 ? argv[1] : "/data", out = argc > 2 ? argv[2] : "/out";
+    Mapping lookup(data + "/regions.csv"), input(data + "/records.csv");
+    std::array<int16_t, 26 * 26 * 26> country_index; country_index.fill(-1);
     std::vector<std::string> codes;
-    std::map<std::string, uint16_t> country_ids;
     std::vector<uint16_t> regions(1000000, UINT16_MAX);
-    std::string line;
-    std::getline(lookup, line);
-    while (std::getline(lookup, line)) {
-      auto comma = line.find(',');
-      uint32_t id = std::stoul(line.substr(0, comma));
-      std::string code = line.substr(comma + 1);
-      auto [it, added] = country_ids.emplace(code, codes.size());
-      if (added) codes.push_back(code);
-      if (id >= regions.size()) regions.resize(id + 1, UINT16_MAX);
-      regions[id] = it->second;
-    }
-    const size_t unmatched = codes.size();
-    codes.push_back("_UNMATCHED");
-    std::vector<Country> groups(codes.size());
-    // The spec has 240 countries plus unmatched. Store every exact name once,
-    // then use one bit per country to count distinct (name, country) pairs.
-    if (codes.size() > 256) throw std::runtime_error("country limit exceeded");
-    std::unordered_map<std::string, std::array<uint64_t, 4>> names;
-    names.reserve(110000);
-    MappedFile bytes(data + "/records.csv");
-    const char *p = bytes.data, *end = p + bytes.size;
-    auto number = [&]() { uint64_t n = 0; while (p < end && *p >= '0' && *p <= '9') n = n * 10 + *p++ - '0'; return n; };
-    auto field = [&](bool retain) {
-      std::string value;
-      size_t length = 0;
-      if (p < end && *p == '"') {
-        ++p;
-        while (p < end) {
-          if (*p == '"') { ++p; if (p == end || *p != '"') break; }
-          if (retain) value += *p;
-          ++p; ++length;
-        }
-      } else {
-        while (p < end && *p != ',' && *p != '\r' && *p != '\n') { if (retain) value += *p; ++p; ++length; }
-      }
-      return std::pair{std::move(value), length};
-    };
-    // The header contains no quoted newline; BOMs are skipped only at record starts.
+    const char *p = lookup.data, *end = p + lookup.size;
     while (p < end && *p++ != '\n') {}
     while (p < end) {
-      if (end - p >= 3 && static_cast<unsigned char>(*p) == 0xEF && static_cast<unsigned char>(p[1]) == 0xBB && static_cast<unsigned char>(p[2]) == 0xBF) p += 3;
-      uint64_t id = number(); ++p;
-      auto [name, name_length] = field(true); ++p;
-      auto [unused_note, note_length] = field(false); ++p;
-      uint64_t region = number(); ++p;
-      bool negative = p < end && *p == '-'; if (negative) ++p;
-      int64_t cents = number() * 100; ++p;
-      cents += number(); if (negative) cents = -cents;
-      if (p < end && *p == '\r') ++p;
-      if (p < end && *p == '\n') ++p;
-      size_t group = region < regions.size() && regions[region] != UINT16_MAX ? regions[region] : unmatched;
-      auto &g = groups[group];
-      ++g.count; g.ids += id; g.sum += cents;
-      g.lo = std::min(g.lo, cents); g.hi = std::max(g.hi, cents);
-      g.name_bytes += name_length; g.note_bytes += note_length;
-      auto &membership = names.try_emplace(std::move(name), std::array<uint64_t, 4>{}).first->second;
-      const uint64_t bit = uint64_t{1} << (group % 64);
-      auto &word = membership[group / 64];
-      if (!(word & bit)) { word |= bit; ++g.names; }
+      uint32_t id = number(p); ++p;
+      uint32_t code = (p[0] - 'A') * 676 + (p[1] - 'A') * 26 + p[2] - 'A';
+      auto &index = country_index[code];
+      if (index < 0) { index = codes.size(); codes.emplace_back(p, 3); }
+      p += 4;
+      if (id >= regions.size()) regions.resize(id + 1, UINT16_MAX);
+      regions[id] = index;
     }
-    std::map<std::string, size_t> order;
-    for (size_t i = 0; i < codes.size(); ++i) order.emplace(codes[i], i);
-    std::filesystem::create_directories(out);
-    std::ofstream result(out + "/aggregates.txt", std::ios::binary);
-    if (!result) throw std::runtime_error("cannot open output");
-    for (const auto &[code, i] : order) {
-      const auto &g = groups[i]; if (!g.count) continue;
-      result << code << ' ' << g.count << ' ' << g.ids << ' ' << money(g.sum) << ' ' << money(g.lo) << ' ' << money(g.hi) << ' ' << g.names << ' ' << g.name_bytes << ' ' << g.note_bytes << '\n';
+    const size_t unmatched = codes.size(); codes.emplace_back("_UNMATCHED");
+    if (codes.size() > 256) throw std::runtime_error("country limit exceeded");
+    p = input.data; end = p + input.size;
+    while (p < end && *p++ != '\n') {}
+    size_t workers = input.size > 1000000 ? 6 : 1;
+    std::vector<const char *> boundary(workers + 1, end); boundary[0] = p;
+    // Section 2.2 guarantees CR only appears in CRLF record terminators.
+    // A bare LF cannot delimit chunks because notes may contain it.
+    for (size_t i = 1; i < workers; ++i) {
+      const char *q = input.data + input.size * i / workers;
+      const char *cr = static_cast<const char *>(memchr(q, '\r', end - q));
+      boundary[i] = cr ? cr + 2 : end;
     }
-    if (!result) throw std::runtime_error("output write failed");
+    std::vector<std::vector<Country>> groups(workers, std::vector<Country>(codes.size()));
+    NameTable names(input.size > 1000000 ? 262144 : 2048);
+    parallel(workers, [&](size_t t) {
+      const char *q = boundary[t];
+      while (q < boundary[t + 1]) {
+        if (static_cast<unsigned char>(*q) == 0xEF) q += 3;
+        uint64_t id = number(q); ++q;
+        Field name = field(q, end); ++q;
+        Field note = field(q, end); ++q;
+        uint32_t region = number(q); ++q;
+        bool negative = *q == '-'; if (negative) ++q;
+        int64_t cents = number(q) * 100; ++q;
+        cents += (q[0] - '0') * 10 + q[1] - '0'; q += 2;
+        if (negative) cents = -cents;
+        if (q < end && *q == '\r') ++q;
+        if (q < end && *q == '\n') ++q;
+        size_t c = region < regions.size() && regions[region] != UINT16_MAX ? regions[region] : unmatched;
+        auto &g = groups[t][c];
+        ++g.count; g.ids += id; g.sum += cents;
+        g.lo = std::min(g.lo, cents); g.hi = std::max(g.hi, cents);
+        g.name_bytes += name.length; g.note_bytes += note.length;
+        // CSV quote escaping is injective: exact encoded-name equality is
+        // exact decoded-name equality. Empty quoted/unquoted views both have length 0.
+        g.names += names.mark(name.bytes, c);
+      }
+    });
+    for (size_t t = 1; t < workers; ++t) {
+      for (size_t c = 0; c < codes.size(); ++c) {
+        auto &g = groups[0][c]; const auto &other = groups[t][c];
+        g.count += other.count; g.ids += other.ids; g.sum += other.sum;
+        g.lo = std::min(g.lo, other.lo); g.hi = std::max(g.hi, other.hi);
+        g.name_bytes += other.name_bytes; g.note_bytes += other.note_bytes;
+        g.names += other.names;
+      }
+    }
+    std::vector<size_t> order(codes.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return codes[a] < codes[b]; });
+    std::string output; output.reserve(20000);
+    for (size_t c : order) {
+      const auto &g = groups[0][c]; if (!g.count) continue;
+      output += codes[c]; output += ' '; append(output, g.count); output += ' '; append(output, g.ids);
+      output += ' '; money(output, g.sum); output += ' '; money(output, g.lo); output += ' '; money(output, g.hi);
+      output += ' '; append(output, g.names); output += ' '; append(output, g.name_bytes); output += ' '; append(output, g.note_bytes); output += '\n';
+    }
+    std::filesystem::create_directories(out); write_file(out + "/aggregates.txt", output);
   } catch (const std::exception &e) { std::cerr << e.what() << '\n'; return 1; }
 }

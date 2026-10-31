@@ -1,83 +1,99 @@
+#include "io.hpp"
 #include <algorithm>
+#include <array>
 #include <atomic>
-#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
+#include <memory>
 #include <limits>
-#include <queue>
-#include <string>
-#include <thread>
-#include <vector>
+#include <utility>
 
-struct Input {
-  std::string bytes; size_t p = 0;
-  explicit Input(const std::string &path) {
-    std::ifstream f(path, std::ios::binary); if (!f) throw std::runtime_error("cannot open " + path);
-    bytes.assign(std::istreambuf_iterator<char>(f), {});
+using Item = std::pair<uint64_t, uint32_t>;
+struct RadixHeap {
+  std::array<std::vector<Item>, 65> buckets;
+  uint64_t last = 0; size_t count = 0;
+  static unsigned bucket(uint64_t difference) { return difference ? 64 - __builtin_clzll(difference) : 0; }
+  void push(uint64_t key, uint32_t node) { buckets[bucket(last ^ key)].emplace_back(key, node); ++count; }
+  uint64_t minimum() {
+    if (buckets[0].empty()) {
+      unsigned b = 1; while (buckets[b].empty()) ++b;
+      last = UINT64_MAX;
+      for (auto item : buckets[b]) last = std::min(last, item.first);
+      for (auto item : buckets[b]) buckets[bucket(last ^ item.first)].push_back(item);
+      buckets[b].clear();
+    }
+    return last;
   }
-  uint32_t number() { while (p < bytes.size() && bytes[p] <= ' ') ++p; uint32_t n = 0; while (p < bytes.size() && bytes[p] >= '0' && bytes[p] <= '9') n = n * 10 + bytes[p++] - '0'; return n; }
-  bool more() { while (p < bytes.size() && bytes[p] <= ' ') ++p; return p < bytes.size(); }
+  Item pop() { minimum(); Item item = buckets[0].back(); buckets[0].pop_back(); --count; return item; }
+  void clear() { for (auto &bucket : buckets) bucket.clear(); count = 0; last = 0; }
 };
 struct Edge { uint32_t v, w; };
-struct Raw { uint32_t u, v, w; };
 int main(int argc, char **argv) {
   try {
-    std::string data = argc > 1 ? argv[1] : "/data", out = argc > 2 ? argv[2] : "/out";
-    Input f(data + "/graph.txt");
-    uint32_t n = f.number(), m = f.number();
-    std::vector<uint32_t> offsets(n + 1), indegree(n);
-    std::vector<Raw> raw; raw.reserve(m);
+    const std::string data = argc > 1 ? argv[1] : "/data", out = argc > 2 ? argv[2] : "/out";
+    Mapping input(data + "/graph.txt"), query_file(data + "/queries.txt");
+    const char *p = input.data;
+    uint32_t n = number(p); ++p; uint32_t m = number(p); ++p;
+    const char *first_edge = p;
+    std::array<std::vector<uint32_t>, 2> offsets{std::vector<uint32_t>(n + 1), std::vector<uint32_t>(n + 1)};
     for (uint32_t i = 0; i < m; ++i) {
-      uint32_t u = f.number(), v = f.number(), w = f.number();
-      raw.push_back({u, v, w}); ++offsets[u + 1]; ++indegree[v];
+      uint32_t u = number(p); ++p; uint32_t v = number(p); ++p; number(p); ++p;
+      ++offsets[0][u + 1]; ++offsets[1][v + 1];
     }
-    for (uint32_t i = 1; i <= n; ++i) offsets[i] += offsets[i - 1];
-    std::vector<Edge> edges(m);
-    auto cursor = offsets;
-    for (auto e : raw) edges[cursor[e.u]++] = {e.v, e.w};
-    // Release build buffers before creating per-worker search state.
-    std::vector<Raw>().swap(raw); std::vector<uint32_t>().swap(cursor); std::string().swap(f.bytes);
-    Input q(data + "/queries.txt");
+    for (auto &o : offsets) for (uint32_t i = 1; i <= n; ++i) o[i] += o[i - 1];
+    std::array<std::vector<Edge>, 2> edges{std::vector<Edge>(m), std::vector<Edge>(m)};
+    auto cursor = offsets; p = first_edge;
+    for (uint32_t i = 0; i < m; ++i) {
+      uint32_t u = number(p); ++p; uint32_t v = number(p); ++p; uint32_t w = number(p); ++p;
+      edges[0][cursor[0][u]++] = {v, w}; edges[1][cursor[1][v]++] = {u, w};
+    }
+    for (auto &c : cursor) std::vector<uint32_t>().swap(c);
     std::vector<std::pair<uint32_t, uint32_t>> queries;
-    while (q.more()) { auto s = q.number(), t = q.number(); queries.emplace_back(s, t); }
+    p = query_file.data;
+    while (p < query_file.data + query_file.size) {
+      uint32_t s = number(p); ++p; uint32_t t = number(p); ++p; queries.emplace_back(s, t);
+    }
     std::vector<int64_t> answers(queries.size(), -1);
-    std::atomic<size_t> next{0};
-    size_t workers = std::min<size_t>(6, std::max<size_t>(1, queries.size()));
+    std::atomic<size_t> next{0}; size_t workers = input.size > 1000000 ? 4 : 1;
     if (const char *env = std::getenv("SD_THREADS")) workers = std::clamp(std::atoi(env), 1, 12);
-    auto work = [&]() {
-      std::vector<uint64_t> dist(n);
-      std::vector<uint32_t> seen(n, 0); uint32_t epoch = 0;
-      using Item = std::pair<uint64_t, uint32_t>;
+    parallel(workers, [&](size_t) {
+      // Distances are read only when the generation tag matches. This avoids
+      // initializing the larger arrays or clearing every node before each query.
+      std::array<std::unique_ptr<uint64_t[]>, 2> dist{std::make_unique_for_overwrite<uint64_t[]>(n), std::make_unique_for_overwrite<uint64_t[]>(n)};
+      std::array<std::vector<uint32_t>, 2> seen{std::vector<uint32_t>(n), std::vector<uint32_t>(n)};
+      std::array<RadixHeap, 2> heap; uint32_t epoch = 0;
       for (;;) {
         size_t i = next.fetch_add(1); if (i >= queries.size()) break;
         auto [s, t] = queries[i];
         if (s == t) { answers[i] = 0; continue; }
-        if (!indegree[t] || offsets[s] == offsets[s + 1]) continue;
-        ++epoch;
-        std::priority_queue<Item, std::vector<Item>, std::greater<Item>> heap;
-        seen[s] = epoch; dist[s] = 0; heap.emplace(0, s);
-        while (!heap.empty()) {
-          auto [d, u] = heap.top(); heap.pop();
-          if (d != dist[u]) continue;
-          if (u == t) { answers[i] = d; break; }
-          for (uint32_t e = offsets[u]; e < offsets[u + 1]; ++e) {
-            auto [v, w] = edges[e]; uint64_t nd = d + w;
-            if (seen[v] != epoch || nd < dist[v]) {
-              seen[v] = epoch; dist[v] = nd; heap.emplace(nd, v);
+        if (offsets[0][s] == offsets[0][s + 1] || offsets[1][t] == offsets[1][t + 1]) continue;
+        ++epoch; heap[0].clear(); heap[1].clear();
+        dist[0][s] = 0; dist[1][t] = 0; seen[0][s] = epoch; seen[1][t] = epoch;
+        heap[0].push(0, s); heap[1].push(0, t);
+        uint64_t best = UINT64_MAX;
+        // Every meeting candidate is a real directed s->t path. Stop when the
+        // two unsettled minima cannot improve the best such path.
+        while (heap[0].count && heap[1].count) {
+          uint64_t a = heap[0].minimum(), b = heap[1].minimum();
+          if (best != UINT64_MAX && a + b >= best) break;
+          unsigned side = heap[0].count <= heap[1].count ? 0 : 1, other = side ^ 1;
+          auto [d, u] = heap[side].pop();
+          if (d != dist[side][u]) continue;
+          if (seen[other][u] == epoch) best = std::min(best, d + dist[other][u]);
+          for (uint32_t e = offsets[side][u]; e < offsets[side][u + 1]; ++e) {
+            auto [v, w] = edges[side][e]; uint64_t nd = d + w;
+            if (seen[side][v] != epoch || nd < dist[side][v]) {
+              seen[side][v] = epoch; dist[side][v] = nd; heap[side].push(nd, v);
+              if (seen[other][v] == epoch) best = std::min(best, nd + dist[other][v]);
             }
           }
         }
+        if (best != UINT64_MAX) answers[i] = best;
       }
-    };
-    std::vector<std::thread> pool;
-    for (size_t i = 0; i < workers; ++i) pool.emplace_back(work);
-    for (auto &thread : pool) thread.join();
-    std::filesystem::create_directories(out);
-    std::ofstream result(out + "/distances.txt", std::ios::binary);
-    if (!result) throw std::runtime_error("cannot open output");
-    for (auto answer : answers) result << answer << '\n';
-    if (!result) throw std::runtime_error("output write failed");
+    });
+    std::string output;
+    for (auto d : answers) { if (d < 0) output += "-1"; else append(output, d); output += '\n'; }
+    std::filesystem::create_directories(out); write_file(out + "/distances.txt", output);
   } catch (const std::exception &e) { std::cerr << e.what() << '\n'; return 1; }
 }

@@ -1,11 +1,13 @@
 # D: Traverse
 
-Edges are parsed once in parallel from mapped input into coarse vertex buckets.
+Edges are parsed once in parallel from mapped input into coarse forward vertex buckets.
 Bucket ownership supplies high vertex bits; local vertex, full uint32 weight and
 opposite vertex fit losslessly in temporary uint64 records. Estimated bucket
 capacity has an exact growing overflow, so skewed inputs retain every edge.
-Each bucket owner counts degrees and fills forward/reverse CSR without atomics
-or global edge sorting. Temporary directions are released as construction finishes.
+Each bucket owner counts degrees and fills forward CSR without atomics or global
+edge sorting. Reverse degrees are counted during parsing. Forward temporary
+buckets are released before parallel transposition fills reverse CSR using
+atomic output cursors. This avoids retaining both directions' temporary edges.
 No route index is stored in the image.
 
 CSR arcs normally occupy four bytes, with node/weight bit widths derived from
@@ -18,9 +20,13 @@ Twelve workers claim queries from an atomic counter. Each worker keeps an exact
 flat hash table of visited nodes in each direction. Generation tags clear a
 query logically, and the tables grow when needed. State therefore follows the
 largest search handled by a worker rather than the full graph. Collisions compare
-node IDs, and distances remain uint64 values. The smaller frontier is expanded; termination
+node IDs, and distances remain uint64 values. The side with fewer discovered nodes is expanded; termination
 requires the two heap minima to reach the best complete path found. Results
 are written after joining workers, in original query order.
+
+Meeting candidates are checked on settled vertices. Every edge joining the two
+settled sets is covered when its second endpoint settles, so looking up the
+opposite state after every individual relaxation is unnecessary.
 
 A query whose target has no incoming edges, or whose source has no outgoing
 edges, is unreachable unless source equals target. These graph facts are computed

@@ -155,7 +155,12 @@ int main(int argc, char **argv) {
     ++p;
     uint32_t m = number(p);
     ++p;
+    unsigned weight_bits = 31 - std::min(31u, unsigned(std::bit_width(n - 1)));
+    uint32_t weight_mask = (uint64_t{1} << weight_bits) - 1;
+    uint32_t neighbor_mask = (uint64_t{1} << (31 - weight_bits)) - 1;
+    auto reverse_cursor = std::make_unique<std::atomic<uint32_t>[]>(n);
     size_t builders = input.size > 1000000 ? 6 : 1;
+    std::vector<uint32_t> reverse_exceptions(builders);
     std::vector<const char *> boundary(builders + 1, input.data + input.size);
     boundary[0] = p;
     for (size_t t = 1; t < builders; ++t) {
@@ -169,13 +174,12 @@ int main(int argc, char **argv) {
     unsigned shift = std::min(10u, 32u - std::bit_width(n - 1));
     uint32_t mask = (uint32_t{1} << shift) - 1;
     size_t blocks = (uint64_t(n) + mask) >> shift;
-    std::vector<std::array<BlockStore, 2>> stores(builders);
+    std::vector<BlockStore> stores(builders);
     parallel(builders, [&](size_t t) {
       size_t expected = uint64_t(m) * (boundary[t + 1] - boundary[t]) /
                         std::max<ptrdiff_t>(1, input.data + input.size - p);
       uint32_t capacity = expected / blocks * 6 / 5 + 32;
-      stores[t][0].initialize(blocks, capacity);
-      stores[t][1].initialize(blocks, capacity);
+      stores[t].initialize(blocks, capacity);
       const char *q = boundary[t];
       while (q < boundary[t + 1]) {
         uint32_t u = number(q);
@@ -184,34 +188,29 @@ int main(int argc, char **argv) {
         ++q;
         uint32_t w = number(q);
         ++q;
-        stores[t][0].append(u >> shift, (uint64_t(v) << (32 + shift)) |
-                                            (uint64_t(w) << shift) |
-                                            (u & mask));
-        stores[t][1].append(v >> shift, (uint64_t(u) << (32 + shift)) |
-                                            (uint64_t(w) << shift) |
-                                            (v & mask));
+        stores[t].append(u >> shift, (uint64_t(v) << (32 + shift)) |
+                                         (uint64_t(w) << shift) | (u & mask));
+        reverse_cursor[v].fetch_add(1, std::memory_order_relaxed);
+        reverse_exceptions[t] += u > neighbor_mask || w > weight_mask;
       }
     });
-    std::array<std::vector<uint32_t>, 2> coarse{
-        std::vector<uint32_t>(blocks + 1), std::vector<uint32_t>(blocks + 1)};
-    for (size_t side = 0; side < 2; ++side) {
+    std::vector<uint32_t> coarse(blocks + 1);
+    {
       uint32_t cursor = 0;
       for (size_t b = 0; b < blocks; ++b) {
-        coarse[side][b] = cursor;
+        coarse[b] = cursor;
         for (size_t t = 0; t < builders; ++t)
-          cursor += stores[t][side].blocks[b].count;
+          cursor += stores[t].blocks[b].count;
       }
-      coarse[side].back() = cursor;
+      coarse.back() = cursor;
       if (cursor != m)
         throw std::runtime_error("edge count mismatch");
     }
     std::array<std::unique_ptr<uint32_t[]>, 2> offsets;
-    unsigned weight_bits = 31 - std::min(31u, unsigned(std::bit_width(n - 1)));
-    uint32_t weight_mask = (uint64_t{1} << weight_bits) - 1;
-    uint32_t neighbor_mask = (uint64_t{1} << (31 - weight_bits)) - 1;
     std::array<std::unique_ptr<uint32_t[]>, 2> edges;
     std::array<std::unique_ptr<uint64_t[]>, 2> wide;
-    for (size_t side = 0; side < 2; ++side) {
+    {
+      constexpr size_t side = 0;
       offsets[side] = std::make_unique_for_overwrite<uint32_t[]>(size_t(n) + 1);
       edges[side] = std::make_unique_for_overwrite<uint32_t[]>(m);
       std::vector<uint32_t> wide_counts(blocks + 1);
@@ -221,13 +220,13 @@ int main(int argc, char **argv) {
           local.fill(0);
           uint32_t exceptions = 0;
           for (size_t worker = 0; worker < builders; ++worker)
-            for (auto row : stores[worker][side].range(b)) {
+            for (auto row : stores[worker].range(b)) {
               ++local[row & mask];
               exceptions += uint32_t(row >> (32 + shift)) > neighbor_mask ||
                             uint32_t(row >> shift) > weight_mask;
             }
           wide_counts[b] = exceptions;
-          uint32_t cursor = coarse[side][b];
+          uint32_t cursor = coarse[b];
           for (size_t j = 0; j <= mask && (b << shift) + j < n; ++j) {
             offsets[side][(b << shift) + j] = cursor;
             cursor += local[j];
@@ -251,7 +250,7 @@ int main(int argc, char **argv) {
             cursor[j] = offsets[side][(b << shift) + j];
           uint32_t exception = wide_counts[b];
           for (size_t worker = 0; worker < builders; ++worker)
-            for (auto row : stores[worker][side].range(b)) {
+            for (auto row : stores[worker].range(b)) {
               uint32_t neighbor = row >> (32 + shift), weight = row >> shift,
                        code;
               if (neighbor <= neighbor_mask && weight <= weight_mask)
@@ -266,7 +265,7 @@ int main(int argc, char **argv) {
       });
       offsets[side][n] = m;
       for (auto &worker : stores)
-        worker[side] = BlockStore{};
+        worker = BlockStore{};
     }
     auto decode = [&](size_t side, uint32_t code) {
       if (!(code >> 31))
@@ -274,6 +273,40 @@ int main(int argc, char **argv) {
       uint64_t value = wide[side][code & 0x7fffffffU];
       return Edge{uint32_t(value >> 32), uint32_t(value)};
     };
+    offsets[1] = std::make_unique_for_overwrite<uint32_t[]>(size_t(n) + 1);
+    uint32_t position = 0, exception_count = 0;
+    for (uint32_t u = 0; u < n; ++u) {
+      offsets[1][u] = position;
+      uint32_t degree = reverse_cursor[u].load(std::memory_order_relaxed);
+      reverse_cursor[u].store(position, std::memory_order_relaxed);
+      position += degree;
+    }
+    offsets[1][n] = position;
+    for (auto count : reverse_exceptions)
+      exception_count += count;
+    edges[1] = std::make_unique_for_overwrite<uint32_t[]>(m);
+    wide[1] = std::make_unique_for_overwrite<uint64_t[]>(exception_count);
+    std::atomic<uint32_t> exception_cursor{0};
+    parallel(builders, [&](size_t t) {
+      for (uint32_t u = uint64_t(n) * t / builders;
+           u < uint64_t(n) * (t + 1) / builders; ++u)
+        for (uint32_t e = offsets[0][u]; e < offsets[0][u + 1]; ++e) {
+          auto [v, w] = decode(0, edges[0][e]);
+          uint32_t code;
+          if (u <= neighbor_mask && w <= weight_mask)
+            code = (u << weight_bits) | w;
+          else {
+            uint32_t exception =
+                exception_cursor.fetch_add(1, std::memory_order_relaxed);
+            wide[1][exception] = (uint64_t(u) << 32) | w;
+            code = (uint32_t{1} << 31) | exception;
+          }
+          uint32_t slot =
+              reverse_cursor[v].fetch_add(1, std::memory_order_relaxed);
+          edges[1][slot] = code;
+        }
+    });
+    reverse_cursor.reset();
     // PROFILE_GRAPH_DONE
     std::vector<std::pair<uint32_t, uint32_t>> queries;
     p = query_file.data;
@@ -319,11 +352,14 @@ int main(int argc, char **argv) {
           uint64_t a = heap[0].minimum(), b = heap[1].minimum();
           if (best != UINT64_MAX && a + b >= best)
             break;
-          unsigned side = heap[0].count <= heap[1].count ? 0 : 1,
+          unsigned side = state[0].used <= state[1].used ? 0 : 1,
                    other = side ^ 1;
           auto [d, u] = heap[side].pop();
           if (d != state[side].get(u))
             continue;
+          // A crossing edge is covered when its second endpoint settles.
+          // Meeting checks on settled vertices avoid a hash read per
+          // relaxation.
           if (auto opposite = state[other].get(u); opposite != UINT64_MAX)
             best = std::min(best, d + opposite);
           for (uint32_t e = offsets[side][u]; e < offsets[side][u + 1]; ++e) {
@@ -331,8 +367,6 @@ int main(int argc, char **argv) {
             uint64_t nd = d + w;
             if (state[side].relax(v, nd)) {
               heap[side].push(nd, v);
-              if (auto opposite = state[other].get(v); opposite != UINT64_MAX)
-                best = std::min(best, nd + opposite);
             }
           }
         }

@@ -96,3 +96,12 @@ and batch barriers while bounding pending output. Six warm alternating local
 runs gave median 0.06369 s versus 0.06949 s for batched Rust (about 8.3% lower).
 Both full public hashes and all twelve parser/ordering edge checks still pass.
 Official measurement of persistent workers is pending.
+
+Persistent-worker receipt for 783111a: run-8383769f6b2c, all gates passed,
+T=0.044363 s, M=21,610,496 bytes, S=371, K=32.423128, points=75.542745.
+Time fell another 7.1% and memory another 7.3% against the first Rust trial.
+
+Next build trial selects target-cpu=native during the offline build on the
+scoring host. The executable stays on that host, so its instruction target
+matches the machine which runs it. This changes compiler scheduling/selection
+without changing the data algorithm. Compare its official K with 32.423128.

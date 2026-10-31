@@ -95,3 +95,18 @@ T=0.297302 s, M=139,333,632 bytes, S=441, K=15.990120, points=60.192587.
 Compared with the earlier best CSR run, time fell 28.4% and peak memory 20.9%.
 A compact binary-heap experiment was correct on the public full hash but slower
 in paired local runs and was rejected; radix heaps remain in production.
+
+Next candidate retains only forward temporary edges and counts reverse degrees
+atomically during parsing. After forward CSR completes, its temporary buckets
+are freed and reverse CSR is filled by parallel transposition with atomic cursors.
+This exchanges some construction time for a much smaller peak working set.
+Meeting checks move from every relaxation to settled vertices, and search work
+is balanced by discovered-node counts. The min-sum stopping condition is unchanged.
+
+Local paired runs: transpose median 0.89 s versus 0.805 s for the dual-temporary
+version, with RSS approximately 191-193 MB versus 246 MB including mapped input.
+Later candidate checks recorded approximately 176-177 MB; file residency and
+system load make the official peak essential. Both full public hashes and all
+9,000 independent graph answers pass. Packed search-state and packed radix-item
+experiments did not show a reliable sufficient gain and were rejected. Official
+time/memory/source tradeoff of transposition remains to be measured.

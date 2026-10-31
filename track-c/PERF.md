@@ -89,3 +89,9 @@ Inline-key receipt for a64a529: run-762f662d461c, all gates passed,
 T=0.061856 s, M=13,987,840 bytes, S=354, K=24.586853, points=69.535147.
 This improves on the previous best 64.190483 points, with substantially less
 memory. It is a single public practice run, not the final holdout result.
+
+The identical binary scored 69.772236 points in run-e29afdf54314 at 783111a,
+T=0.060527 s, M=13,983,744 bytes, K=24.856772. Next trial uses six workers
+to compare one worker per physical core against twelve hardware threads.
+Linear probing remains: a quadratic-probing experiment did not provide a
+reliable sufficient local gain. Full public hashes also pass with six workers.

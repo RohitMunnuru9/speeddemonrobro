@@ -8,7 +8,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = {"a": "summary.txt", "c": "aggregates.txt", "d": "distances.txt"}
+OUTPUT = {"a": "summary.txt", "b": "results.txt", "c": "aggregates.txt", "d": "distances.txt"}
 
 def run(args, **kwargs):
     return subprocess.run([str(a) for a in args], cwd=ROOT, check=True, **kwargs)
@@ -17,7 +17,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--label", default="sample-1")
     parser.add_argument("--tracks", nargs="+", default=list(OUTPUT))
+    parser.add_argument("--expected", help="explicit published hash, for a single selected track")
     args = parser.parse_args()
+    if args.expected and len(args.tracks) != 1:
+        parser.error("--expected requires exactly one track")
     evidence = []
     for track in args.tracks:
         name = OUTPUT[track]
@@ -27,7 +30,7 @@ def main():
         image_size = int(run(["docker", "image", "inspect", "-f", "{{.Size}}", tag], capture_output=True, text=True).stdout)
         assert image_size <= 2 * 1024**3
         data = ROOT / ".data" / args.label / track
-        expected = hashlib.sha256((ROOT / ".results" / args.label / track / "reference" / name).read_bytes()).hexdigest()
+        expected = args.expected or hashlib.sha256((ROOT / ".results" / args.label / track / "reference" / name).read_bytes()).hexdigest()
         with tempfile.TemporaryDirectory(prefix="sd-", dir=ROOT / ".results") as folder:
             start = time.perf_counter()
             run(["docker", "run", "--rm", "--network=none", "--read-only", "--tmpfs", "/tmp:rw,size=1g,exec", "--memory=8g", "--memory-swap=8g", "--pids-limit=512", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--user", "65534:65534", "--ulimit", "nofile=8192:8192", "-e", f"TRACK={track}", "-v", f"{data}:/data:ro", "-v", f"{folder}:/out:rw", tag], timeout=300)

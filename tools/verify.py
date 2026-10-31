@@ -12,7 +12,7 @@ import subprocess
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-TRACKS = {"a": ("a_ingest", "summary.txt"), "c": ("c_join", "aggregates.txt"), "d": ("d_traverse", "distances.txt")}
+TRACKS = {"a": ("a_ingest", "summary.txt"), "b": ("b_index", "results.txt"), "c": ("c_join", "aggregates.txt"), "d": ("d_traverse", "distances.txt")}
 
 def run(args):
     subprocess.run([str(a) for a in args], cwd=ROOT, check=True)
@@ -64,6 +64,9 @@ def main():
         data.mkdir(parents=True, exist_ok=True)
         if track == "a":
             (data / "requests.log").write_bytes(mod.WORKED_INPUT.encode())
+        elif track == "b":
+            (data / "docs.txt").write_bytes(mod.EXAMPLE_DOCS)
+            (data / "queries.txt").write_bytes(mod.EXAMPLE_QUERIES)
         elif track == "c":
             (data / "records.csv").write_bytes(mod.WORKED_RECORDS)
             (data / "regions.csv").write_bytes(mod.WORKED_REGIONS)

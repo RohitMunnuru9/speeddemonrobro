@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
-from verify import ROOT, TRACKS
+from verify import ROOT, TRACKS, compile_entry
 
 p = argparse.ArgumentParser()
 p.add_argument("tracks", nargs="+", choices=list(TRACKS))
@@ -20,7 +20,7 @@ for t in args.tracks:
     binary = ROOT / ".build" / ("c-v2" if t == "c" else t)
     old = ROOT / ".build" / ("baseline-" + t)
     if binary.exists() and not old.exists(): shutil.copyfile(binary, old)
-    subprocess.run(["g++", "-std=c++20", "-O3", "-march=x86-64-v3", "-pthread", "-Wall", "-Wextra", "-Wpedantic", str(ROOT / f"track-{t}/main.cpp"), "-o", str(binary)], check=True)
+    compile_entry(t, binary)
     for label in ("tiny-1", "tiny-2", "sample-1", "sample-2", "full-1", "full-2"):
         filename = TRACKS[t][1]
         oracle = ROOT / ".results" / label / t / "reference" / filename

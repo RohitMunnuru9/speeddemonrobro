@@ -15,13 +15,14 @@ membership fetch-or counts each name/country pair once across all workers.
 The CSV quote encoding is injective, so comparing encoded name payloads gives
 exact decoded equality without allocating strings. Quoted and unquoted empty
 payloads compare equal. Escapes are still counted to obtain decoded byte lengths.
-Each distinct key and its country mask occupy a cache-line-aligned arena record.
-The 16-byte table entries contain hash, offset and length; empty slots do not
-allocate masks. Arena capacity includes input bytes and bounded slot overhead.
-The table uses 32-bit arena offsets and lengths at the published sub-4-GB scale,
-and an exact fallback for probe chains over 128 entries. Membership bits already
-observed set need no atomic write. Country IDs fit in a byte (240 countries plus
-the unmatched group). The short-window hash always checks full key bytes.
+Encoded names up to 31 bytes live inline with their membership mask in a 64-byte
+slot. A length byte makes padded keys exact even with embedded zero bytes.
+The first word publishes the remaining key through acquire/release ordering.
+Long names, reserved first words and probe chains over 128 entries use an exact
+locked fallback without a name-length limit. Empty names share a separate mask.
+Country IDs fit in a byte (240 countries plus the unmatched group). Hash hits
+compare all padded key bytes. A bounded AVX2 quote scan handles short fields;
+longer fields continue through libc byte search.
 Notes are scanned without allocation. Input is mapped read-only, sums use 64-bit
 integers, countries without records are omitted, and output keys sort bytewise.
 

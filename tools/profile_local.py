@@ -4,7 +4,7 @@ import subprocess
 from verify import ROOT
 
 parser = argparse.ArgumentParser()
-parser.add_argument("track", choices=["a", "b", "d"])
+parser.add_argument("track", choices=["b", "d"])
 args = parser.parse_args()
 phases = {
     "a": [("PARSE_DONE", "parse"), ("MERGE_DONE", "merge"), ("SCATTER_DONE", "scatter"), ("FORMAT_DONE", "format")],

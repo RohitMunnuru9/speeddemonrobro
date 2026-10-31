@@ -1,24 +1,24 @@
 # A: Ingest
 
-Twelve workers parse disjoint line-aligned ranges of read-only mapped input.
-The fixed UTC span maps into 72 hour buckets. Endpoints are exact string views,
-so parsing creates no endpoint strings per record. Each worker appends latencies
-directly to its groups. Three values fit inline; larger groups grow an exact
-array. Sparse 64-group pages are allocated only for encountered hour/endpoint
-combinations. This makes no assumption about input time order. Global endpoint
-names are interned before sorting, and endpoint references are prepared in parallel.
+This Rust entry maps the input read-only. Twelve workers first index contiguous
+runs of each hour, preserving every run even when hours return out of order.
+Each subsequent job exclusively owns one hour, so latency groups need no merge
+or shared writes. Worker hash tables borrow endpoint bytes from the mapping;
+sampled hashes always resolve collisions with full byte equality. Tables and
+latency vector capacity are reused across hours.
 
-Small groups are sorted; larger groups use exact selection at the three nearest
-ranks. Each formatting worker reuses one group-sized scratch buffer and frees
-the completed hour's input groups. Output hours are buffered independently,
+Bounded AVX2 loads find spaces and LF within a 64-byte record window; longer
+records and tails use scalar parsing. Known-length decimal conversion covers
+the full uint32 latency range. Small groups are sorted; larger groups use exact
+selection at the three nearest ranks. At most twelve hours of output are buffered,
 then written in order to one file without a second joined copy.
 Endpoints sort bytewise. Duplicate records count separately; all ranks and rates
 use integer arithmetic.
 
-No external dependencies. Build and run the Dockerfile; optional command line
-arguments select the input and output directories for local verification.
-Compiler profile guidance comes from a full-size generated seed-17 dataset;
-only the executable enters the final image.
+No external crates. The allowlisted Rust compiler builds offline with thin LTO.
+Unsafe code is limited to the read-only mapping, bounded byte searches, unaligned
+in-slice loads and AVX2 parsing. Scoped threads cannot outlive their input.
+Build and run the Dockerfile; optional arguments select local input/output paths.
 
-With another 24 hours: compare compact hash tables and vectorized parsing, then
-reduce temporary buffer memory. Retain changes only when board K improves.
+With another 24 hours: compare persistent worker scheduling and radix selection,
+including thread startup and memory costs. Retain changes when measured K improves.

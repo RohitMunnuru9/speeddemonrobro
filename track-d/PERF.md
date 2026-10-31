@@ -64,3 +64,28 @@ much preprocessing (roughly 0.9-1.1 s build); degree-two contraction reduced ful
 nodes from 1,740,512 to 1,342,958 but increased total time; pruning unqueried
 bidirectional leaves also failed to repay preprocessing. Unidirectional radix
 search used less memory but was slower end to end. These variants are not retained.
+
+Inline-adjacency receipt for 74f2b9b: run-bac560020c72, all gates passed,
+T=0.440488 s, M=183,824,384 bytes, S=377, K=12.724149, points=55.231438.
+This regressed against the earlier CSR result and was replaced.
+
+Next candidate parses edges once into coarse forward/reverse buckets, with
+lossless packed temporary records and exact overflow for capacity estimates.
+Bucket owners produce CSR using small local degree arrays. Ordinary final arcs
+occupy four bytes; a tagged exact exception array handles large weights/nodes.
+Node and weight widths derive from the current graph. Distances remain uint64,
+and the prior bidirectional sparse-state/radix-heap search is retained.
+
+Algorithm inspiration, independently implemented here:
+https://github.com/ahptour/friday-oct-30-2026/blob/speed-demon/track-d/PERF.md
+We read its public account of owner-routed CSR and narrow/wide arc storage,
+then implemented our own bucket capacity/overflow and construction pipeline.
+Its benchmark numbers are not claimed as ours.
+
+The compact-CSR candidate passes complete full seed 1/2 hashes, independent
+full seed 17, official edge cases and 9,000 arbitrary-graph answers compared
+against an independent Bellman-Ford oracle. Zero-edge graphs are also checked.
+Native RSS including mapped input fell to approximately 246 MB; development
+wall times varied substantially with load, so the board decides the tradeoff.
+The actual offline image passes the sealed full public hash check. Official
+measurement of this candidate is pending.

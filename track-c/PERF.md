@@ -65,3 +65,22 @@ aligns each record to 64 bytes and restores 262,144 slots. Payload capacity is
 input bytes plus a bounded header/padding allowance per slot. Full seeds 1/2,
 concurrent duplicate names and >128 deliberately identical short-window hashes
 pass. Build-time training now uses full seed-17 data. Official measurement pending.
+
+Arena receipt for 74f2b9b: run-4294a7441c5c, all gates passed,
+T=0.092825 s, M=33,906,688 bytes, S=357, K=16.792088, points=61.255235.
+This regressed; the best previous C result remains 64.190483 points.
+
+Next candidate replaces the arena and metadata indirection with 64-byte inline
+name/mask slots, a length-tagged 32-byte key and an exact long-key/crowding map.
+Acquire/release publication protects key initialization; atomic membership
+fetch-or remains exact across workers. A bounded AVX2 scan handles the first
+32 bytes of a quoted field, then libc continues if needed. Scalar decimal
+parsing remains: multiple packed-decimal variants failed to improve paired runs.
+
+In three alternating native runs at twelve workers, the inline table before
+the quote helper had median 0.2673 s versus 0.3617 s for our historical best-board
+source (about 26% lower). A larger inline table was slower and was rejected.
+These development timings are not board predictions. Both public full seeds,
+the independent full seed 17, concurrent name duplicates, embedded LF/escaped
+quotes/empty names and deliberately colliding sampled hashes pass. The offline
+Docker full-public hash also passes. Official measurement is pending.

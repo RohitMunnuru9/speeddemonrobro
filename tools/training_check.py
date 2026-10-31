@@ -10,12 +10,14 @@ ROOT = Path(__file__).resolve().parents[1]
 MODULES = {'a':'a_ingest', 'b':'b_index', 'c':'c_join', 'd':'d_traverse'}
 OUTPUTS = {'a':'summary.txt', 'b':'results.txt', 'c':'aggregates.txt', 'd':'distances.txt'}
 parser = argparse.ArgumentParser()
-parser.add_argument('--tracks', nargs='+', choices=list(MODULES), default=list(MODULES))
+parser.add_argument('--tracks', nargs='+', choices=['b', 'c', 'd'], default=['b', 'c', 'd'],
+                    help='PGO build inputs; Rust A uses tools/verify.py --tracks a --scales full --seeds 17')
 args = parser.parse_args()
 for track in args.tracks:
     tag = f'speeddemon-validation/{track}'
     subprocess.run(['docker', 'build', '--network=none', '--target', 'build', '-t', tag, str(ROOT/f'track-{track}')], check=True, timeout=600)
     code = f'''import hashlib,json,pathlib,subprocess
+pathlib.Path('/out/reference').mkdir()
 subprocess.run(['python3','/reference/{MODULES[track]}.py','--data','/training','--out','/out/reference'],check=True)
 subprocess.run(['/solution','/training','/out/ours'],check=True)
 expected=pathlib.Path('/out/reference/{OUTPUTS[track]}').read_bytes()

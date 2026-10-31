@@ -1,6 +1,6 @@
 # Speed Demon entry
 
-Four independent C++20 entries: A Ingest, B Index, C Join and D Traverse. Each track
+Four independent entries: A Ingest in Rust; B Index, C Join and D Traverse in C++20. Each track
 builds offline and has no nonstandard runtime dependencies. MIT licensed.
 
 The organizer and starter checkouts are local reference material, ignored by Git.
@@ -8,7 +8,7 @@ Only each `track-*` folder is a Docker build context.
 
 ## Local verification
 
-On Linux with GCC 15 and Python 3.11 or newer:
+On Linux with Docker, GCC 15 and Python 3.11 or newer:
 
 ```
 git clone https://github.com/hackathon-raptors/speed-demon-2026 organizer
@@ -32,8 +32,9 @@ All four tracks passed organizer board runs on October 31, 2026.
 Each track's PERF.md records its exact run ID and measurements. Local measurements
 and practice-board results are distinct from final holdout scoring.
 
-The offline builds use compiler profile guidance from an independently generated
-full-size seed-17 dataset. Only the compiled executable enters the final image; it builds
+The C++ offline builds use compiler profile guidance from an independently generated
+full-size seed-17 dataset. Rust A uses an offline standard-library-only Cargo build
+with thin LTO and no compiler training. Only each compiled executable enters its final image; it builds
 all data structures from the supplied runtime files. The training generators are
 byte-identical copies of the published organizer sources, excluded from S under
 the published-copies rule. No training outputs or precomputed answers are shipped.

@@ -25,6 +25,7 @@ def check(track, files, expected, threads=None):
 
 subprocess.run(["g++", "-std=c++20", "-O3", "-pthread", "-Wall", "-Wextra", "-Wpedantic", str(ROOT / "track-c/main.cpp"), "-o", str(ROOT / ".build/c-v2")], check=True)
 a, c, d = (load_test(t) for t in ("a", "c", "d"))
+check("d", {"graph.txt": "2 0\n", "queries.txt": "0 0\n0 1\n1 0\n1 1\n"}, "0\n-1\n-1\n0\n")
 check("a", {"requests.log": ""}, "")
 check("a", {"requests.log": a.edge_input()}, a.run_reference(a.edge_input()))
 check("c", {"records.csv": c.WORKED_RECORDS, "regions.csv": c.WORKED_REGIONS}, c.WORKED_OUTPUT)

@@ -8,6 +8,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <span>
 #include <utility>
 
 using Item = std::pair<uint64_t, uint32_t>;
@@ -81,7 +82,7 @@ struct SearchState {
     return UINT64_MAX;
   }
   bool relax(uint32_t node, uint64_t distance) {
-    if ((used + 1) * 2 > entries.size()) {
+    if ((used + 1) * 4 > entries.size() * 3) {
       auto old = std::move(entries);
       entries.resize(old.size() * 2);
       used = 0;
@@ -107,41 +108,43 @@ struct SearchState {
 struct Edge {
   uint32_t v, w;
 };
-struct Node {
-  std::array<Edge, 3> local;
-  uint32_t count = 0, overflow = 0;
-};
-struct Raw {
-  uint32_t u, v, w;
-};
-void radix_sort(std::vector<Raw> &rows, uint32_t nodes, bool reverse,
-                size_t workers) {
-  std::vector<Raw> scratch(rows.size());
-  std::vector<std::array<size_t, 2048>> counts(workers), positions(workers);
-  for (unsigned shift = 0; (uint64_t(nodes - 1) >> shift) != 0; shift += 11) {
-    parallel(workers, [&](size_t t) {
-      counts[t].fill(0);
-      for (size_t i = rows.size() * t / workers;
-           i < rows.size() * (t + 1) / workers; ++i)
-        ++counts[t][((reverse ? rows[i].v : rows[i].u) >> shift) & 2047];
-    });
-    size_t position = 0;
-    for (size_t b = 0; b < 2048; ++b)
-      for (size_t t = 0; t < workers; ++t) {
-        positions[t][b] = position;
-        position += counts[t][b];
-      }
-    parallel(workers, [&](size_t t) {
-      auto &cursor = positions[t];
-      for (size_t i = rows.size() * t / workers;
-           i < rows.size() * (t + 1) / workers; ++i) {
-        Raw e = rows[i];
-        scratch[cursor[((reverse ? e.v : e.u) >> shift) & 2047]++] = e;
-      }
-    });
-    rows.swap(scratch);
+struct BlockStore {
+  struct Block {
+    uint32_t offset = 0, count = 0, capacity = 0;
+  };
+  std::unique_ptr<uint64_t[]> values;
+  std::vector<Block> blocks;
+  std::vector<std::vector<uint64_t>> overflow;
+  void initialize(size_t count, uint32_t capacity) {
+    values = std::make_unique_for_overwrite<uint64_t[]>(count * capacity);
+    blocks.resize(count);
+    for (size_t i = 0; i < count; ++i)
+      blocks[i] = {uint32_t(i * capacity), 0, capacity};
   }
-}
+  void append(size_t index, uint64_t value) {
+    auto &block = blocks[index];
+    if (block.capacity && block.count < block.capacity)
+      values[block.offset + block.count] = value;
+    else {
+      if (block.capacity) {
+        auto first = values.get() + block.offset;
+        overflow.emplace_back(first, first + block.count);
+        block.offset = overflow.size() - 1;
+        block.capacity = 0;
+      }
+      overflow[block.offset].push_back(value);
+    }
+    ++block.count;
+  }
+  std::span<const uint64_t> range(size_t index) const {
+    const auto &block = blocks[index];
+    if (!block.count)
+      return {};
+    return block.capacity ? std::span<const uint64_t>(
+                                values.get() + block.offset, block.count)
+                          : std::span<const uint64_t>(overflow[block.offset]);
+  }
+};
 int main(int argc, char **argv) {
   try {
     const std::string data = argc > 1 ? argv[1] : "/data",
@@ -161,18 +164,19 @@ int main(int argc, char **argv) {
       }
       boundary[t] = q;
     }
-    std::vector<size_t> starts(builders + 1);
+    // The coarse vertex block supplies high vertex bits. The remaining local
+    // ID, full uint32 weight and opposite ID fit losslessly in one uint64.
+    unsigned shift = std::min(10u, 32u - std::bit_width(n - 1));
+    uint32_t mask = (uint32_t{1} << shift) - 1;
+    size_t blocks = (uint64_t(n) + mask) >> shift;
+    std::vector<std::array<BlockStore, 2>> stores(builders);
     parallel(builders, [&](size_t t) {
-      starts[t + 1] = std::count(boundary[t], boundary[t + 1], '\n');
-    });
-    for (size_t t = 1; t <= builders; ++t)
-      starts[t] += starts[t - 1];
-    if (starts.back() != m)
-      throw std::runtime_error("edge count mismatch");
-    std::vector<Raw> raw(m);
-    parallel(builders, [&](size_t t) {
+      size_t expected = uint64_t(m) * (boundary[t + 1] - boundary[t]) /
+                        std::max<ptrdiff_t>(1, input.data + input.size - p);
+      uint32_t capacity = expected / blocks * 6 / 5 + 32;
+      stores[t][0].initialize(blocks, capacity);
+      stores[t][1].initialize(blocks, capacity);
       const char *q = boundary[t];
-      size_t i = starts[t];
       while (q < boundary[t + 1]) {
         uint32_t u = number(q);
         ++q;
@@ -180,32 +184,96 @@ int main(int argc, char **argv) {
         ++q;
         uint32_t w = number(q);
         ++q;
-        raw[i++] = {u, v, w};
+        stores[t][0].append(u >> shift, (uint64_t(v) << (32 + shift)) |
+                                            (uint64_t(w) << shift) |
+                                            (u & mask));
+        stores[t][1].append(v >> shift, (uint64_t(u) << (32 + shift)) |
+                                            (uint64_t(w) << shift) |
+                                            (v & mask));
       }
     });
-    std::array<std::vector<Node>, 2> adjacency;
-    std::array<std::vector<Edge>, 2> overflow;
-    // Sparse road graphs usually fit their first three outgoing arcs directly
-    // in a 32-byte node. Larger degrees use exact contiguous overflow ranges.
+    std::array<std::vector<uint32_t>, 2> coarse{
+        std::vector<uint32_t>(blocks + 1), std::vector<uint32_t>(blocks + 1)};
     for (size_t side = 0; side < 2; ++side) {
-      radix_sort(raw, n, side == 1, builders);
-      adjacency[side].resize(n);
-      overflow[side].reserve(m / 3);
-      for (auto edge : raw) {
-        uint32_t u = side ? edge.v : edge.u;
-        Edge value{side ? edge.u : edge.v, edge.w};
-        auto &node = adjacency[side][u];
-        if (node.count < 3)
-          node.local[node.count] = value;
-        else {
-          if (node.count == 3)
-            node.overflow = overflow[side].size();
-          overflow[side].push_back(value);
-        }
-        ++node.count;
+      uint32_t cursor = 0;
+      for (size_t b = 0; b < blocks; ++b) {
+        coarse[side][b] = cursor;
+        for (size_t t = 0; t < builders; ++t)
+          cursor += stores[t][side].blocks[b].count;
       }
+      coarse[side].back() = cursor;
+      if (cursor != m)
+        throw std::runtime_error("edge count mismatch");
     }
-    std::vector<Raw>().swap(raw);
+    std::array<std::unique_ptr<uint32_t[]>, 2> offsets;
+    unsigned weight_bits = 31 - std::min(31u, unsigned(std::bit_width(n - 1)));
+    uint32_t weight_mask = (uint64_t{1} << weight_bits) - 1;
+    uint32_t neighbor_mask = (uint64_t{1} << (31 - weight_bits)) - 1;
+    std::array<std::unique_ptr<uint32_t[]>, 2> edges;
+    std::array<std::unique_ptr<uint64_t[]>, 2> wide;
+    for (size_t side = 0; side < 2; ++side) {
+      offsets[side] = std::make_unique_for_overwrite<uint32_t[]>(size_t(n) + 1);
+      edges[side] = std::make_unique_for_overwrite<uint32_t[]>(m);
+      std::vector<uint32_t> wide_counts(blocks + 1);
+      parallel(builders, [&](size_t t) {
+        std::array<uint32_t, 1024> local;
+        for (size_t b = t; b < blocks; b += builders) {
+          local.fill(0);
+          uint32_t exceptions = 0;
+          for (size_t worker = 0; worker < builders; ++worker)
+            for (auto row : stores[worker][side].range(b)) {
+              ++local[row & mask];
+              exceptions += uint32_t(row >> (32 + shift)) > neighbor_mask ||
+                            uint32_t(row >> shift) > weight_mask;
+            }
+          wide_counts[b] = exceptions;
+          uint32_t cursor = coarse[side][b];
+          for (size_t j = 0; j <= mask && (b << shift) + j < n; ++j) {
+            offsets[side][(b << shift) + j] = cursor;
+            cursor += local[j];
+          }
+        }
+      });
+      uint32_t total = 0;
+      for (size_t b = 0; b < blocks; ++b) {
+        uint32_t count = wide_counts[b];
+        wide_counts[b] = total;
+        total += count;
+      }
+      wide_counts.back() = total;
+      if (total >= uint32_t{1} << 31)
+        throw std::runtime_error("wide edge index overflow");
+      wide[side] = std::make_unique_for_overwrite<uint64_t[]>(total);
+      parallel(builders, [&](size_t t) {
+        std::array<uint32_t, 1024> cursor;
+        for (size_t b = t; b < blocks; b += builders) {
+          for (size_t j = 0; j <= mask && (b << shift) + j < n; ++j)
+            cursor[j] = offsets[side][(b << shift) + j];
+          uint32_t exception = wide_counts[b];
+          for (size_t worker = 0; worker < builders; ++worker)
+            for (auto row : stores[worker][side].range(b)) {
+              uint32_t neighbor = row >> (32 + shift), weight = row >> shift,
+                       code;
+              if (neighbor <= neighbor_mask && weight <= weight_mask)
+                code = (neighbor << weight_bits) | weight;
+              else {
+                wide[side][exception] = (uint64_t(neighbor) << 32) | weight;
+                code = (uint32_t{1} << 31) | exception++;
+              }
+              edges[side][cursor[row & mask]++] = code;
+            }
+        }
+      });
+      offsets[side][n] = m;
+      for (auto &worker : stores)
+        worker[side] = BlockStore{};
+    }
+    auto decode = [&](size_t side, uint32_t code) {
+      if (!(code >> 31))
+        return Edge{code >> weight_bits, code & weight_mask};
+      uint64_t value = wide[side][code & 0x7fffffffU];
+      return Edge{uint32_t(value >> 32), uint32_t(value)};
+    };
     // PROFILE_GRAPH_DONE
     std::vector<std::pair<uint32_t, uint32_t>> queries;
     p = query_file.data;
@@ -233,7 +301,8 @@ int main(int argc, char **argv) {
           answers[i] = 0;
           continue;
         }
-        if (!adjacency[0][s].count || !adjacency[1][t].count)
+        if (offsets[0][s] == offsets[0][s + 1] ||
+            offsets[1][t] == offsets[1][t + 1])
           continue;
         state[0].clear();
         state[1].clear();
@@ -257,20 +326,15 @@ int main(int argc, char **argv) {
             continue;
           if (auto opposite = state[other].get(u); opposite != UINT64_MAX)
             best = std::min(best, d + opposite);
-          auto relax_edge = [&](Edge edge) {
-            auto [v, w] = edge;
+          for (uint32_t e = offsets[side][u]; e < offsets[side][u + 1]; ++e) {
+            auto [v, w] = decode(side, edges[side][e]);
             uint64_t nd = d + w;
             if (state[side].relax(v, nd)) {
               heap[side].push(nd, v);
               if (auto opposite = state[other].get(v); opposite != UINT64_MAX)
                 best = std::min(best, nd + opposite);
             }
-          };
-          const auto &node = adjacency[side][u];
-          for (size_t e = 0; e < std::min<uint32_t>(3, node.count); ++e)
-            relax_edge(node.local[e]);
-          for (size_t e = 3; e < node.count; ++e)
-            relax_edge(overflow[side][node.overflow + e - 3]);
+          }
         }
         if (best != UINT64_MAX)
           answers[i] = best;

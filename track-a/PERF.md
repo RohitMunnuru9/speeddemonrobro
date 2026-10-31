@@ -55,3 +55,32 @@ joined copy. Full seeds 1/2 pass. Native full time was roughly 0.12-0.16 s and
 was correct but was superseded by this direct grouping layout. Compiler training
 now uses the full seed-17 scale; local offline build and full public hash pass.
 Official time/memory/source tradeoff remains to be measured.
+
+Direct-group receipt for 74f2b9b: run-acf8952fba0b, all gates passed,
+T=0.055598 s, M=44,253,184 bytes, S=360, K=25.208124, points=70.077026.
+
+Rust candidate: replace cross-worker hour grouping with an initial hour-range
+index and exclusive hour jobs. Reuse borrowed-key tables and latency capacity
+across hour batches. Add bounded 64-byte AVX2 delimiter scanning, known-length
+decimal conversion, progressive exact selection and ordered buffered writing.
+No external crates, PGO data or generators enter this build.
+
+We read the public algorithm/write-up, rather than copying its implementation:
+https://github.com/ahptour/friday-oct-30-2026/blob/speed-demon/track-a/PERF.md
+Its hour ownership and bounded SIMD parsing motivated an independently written
+C++ experiment, followed by this Rust implementation. The public write-up is
+credited as inspiration; its measurements are not our results.
+
+Paired local Docker-volume comparison, twelve workers, identical algorithms and
+x86-64-v3 target: six warm alternating runs gave a Rust median of 0.07715 s
+versus 0.08074 s for our hour-owned C++ experiment (about 4.4% lower wall time).
+RSS including the mapped input was approximately 246 MB for both. This compares
+languages on a four-CPU development machine, not against our old board binary
+or on the scoring box. The architectural change must be measured separately.
+
+Rust matches complete reference bytes on tiny/sample/full seeds 1 and 2, plus
+an independently generated full seed 17. Twelve additional checks cover empty
+input, official worked/edge cases, all methods, endpoint lengths 1..129, latency
+widths through UINT32_MAX, arbitrary hour returns and 1/6/12 workers. The actual
+offline Docker image also passes full public seed 1 under the sealed-run gates.
+Official measurement of the Rust candidate is pending.

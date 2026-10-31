@@ -5,6 +5,7 @@
 #include <bit>
 #include <cstdlib>
 #include <filesystem>
+#include <immintrin.h>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -16,102 +17,92 @@ struct Country {
   uint64_t count = 0, ids = 0, name_bytes = 0, note_bytes = 0, names = 0;
   int64_t sum = 0, lo = INT64_MAX, hi = INT64_MIN;
 };
-struct Name {
-  uint32_t offset = 0, length = 0;
-  std::atomic<uint64_t> hash{0};
-};
-struct NameBody {
+struct alignas(64) Name {
+  std::atomic<uint64_t> prefix{0};
+  std::array<uint64_t, 3> tail{};
   std::array<std::atomic<uint64_t>, 4> countries{};
 };
-// Collision checks always compare the actual bytes; hashes are not identities.
+// Short encoded payloads live directly with their masks. A length byte makes
+// the padded 32-byte key injective even when a payload contains zero bytes.
+// Longer keys and crowded probe chains retain an unbounded exact fallback.
 struct NameTable {
   size_t capacity;
   std::unique_ptr<Name[]> entries;
-  std::unique_ptr<char, decltype(&std::free)> arena;
-  std::atomic<size_t> arena_used{0};
+  std::array<std::atomic<uint64_t>, 4> empty{};
   std::mutex mutex;
   std::unordered_map<std::string_view, std::array<uint64_t, 4>> overflow;
-  NameTable(size_t size, size_t bytes)
-      : capacity(size), entries(std::make_unique<Name[]>(size)),
-        arena(static_cast<char *>(std::aligned_alloc(
-                  64, (bytes + size * 96 + 63) & ~size_t{63})),
-              std::free) {
-    if (!arena)
-      throw std::bad_alloc();
-    if (bytes + size * 96 > UINT32_MAX)
-      throw std::runtime_error("CSV exceeds key arena bound");
-  }
+  explicit NameTable(size_t size)
+      : capacity(size), entries(std::make_unique<Name[]>(size)) {}
   bool mark(std::string_view text, size_t country) {
-    uint64_t first = 0, last = 0;
-    if (text.size() < 8)
-      memcpy(&first, text.data(), text.size());
-    else {
-      memcpy(&first, text.data(), 8);
+    uint64_t bit = uint64_t{1} << (country % 64);
+    if (text.empty())
+      return !(empty[country / 64].fetch_or(bit, std::memory_order_relaxed) &
+               bit);
+    auto fallback = [&] {
+      std::lock_guard lock(mutex);
+      auto &word = overflow[text][country / 64];
+      bool added = !(word & bit);
+      word |= bit;
+      return added;
+    };
+    if (text.size() > 31)
+      return fallback();
+    std::array<uint64_t, 4> key{};
+    memcpy(key.data(), text.data(), text.size());
+    reinterpret_cast<unsigned char *>(key.data())[31] = text.size();
+    if (key[0] < 2)
+      return fallback();
+    uint64_t last = 0;
+    if (text.size() >= 8)
       memcpy(&last, text.data() + text.size() - 8, 8);
-    }
-    uint64_t hash = first ^ std::rotl(last, 29) ^ text.size();
+    uint64_t hash = key[0] ^ std::rotl(last, 29) ^ text.size();
     hash ^= hash >> 33;
     hash *= 0xff51afd7ed558ccdULL;
     hash ^= hash >> 33;
-    if (hash < 2)
-      hash += 2;
     size_t slot = hash & (capacity - 1);
-    uint64_t bit = uint64_t{1} << (country % 64);
     for (size_t probe = 0; probe < 128; ++probe) {
       auto &entry = entries[slot];
-      uint64_t present = entry.hash.load(std::memory_order_acquire);
-      if (!present && entry.hash.compare_exchange_strong(
+      uint64_t present = entry.prefix.load(std::memory_order_acquire);
+      if (!present && entry.prefix.compare_exchange_strong(
                           present, 1, std::memory_order_acq_rel)) {
-        // Copy each distinct key once into compact storage. Comparing against
-        // scattered first occurrences in the 200 MB input caused cache misses.
-        // Payload bytes are bounded by input size; the arena also reserves a
-        // 32-byte mask and up to 63 padding bytes per possible occupied slot.
-        size_t allocation = (sizeof(NameBody) + text.size() + 63) & ~size_t{63};
-        char *owned = arena.get() + arena_used.fetch_add(
-                                        allocation, std::memory_order_relaxed);
-        std::construct_at(reinterpret_cast<NameBody *>(owned));
-        memcpy(owned + sizeof(NameBody), text.data(), text.size());
-        entry.offset = owned - arena.get();
-        entry.length = text.size();
-        entry.hash.store(hash, std::memory_order_release);
-        present = hash;
+        entry.tail = {key[1], key[2], key[3]};
+        entry.prefix.store(key[0], std::memory_order_release);
+        present = key[0];
       }
       while (present == 1)
-        present = entry.hash.load(std::memory_order_acquire);
-      if (present == hash &&
-          std::string_view(arena.get() + entry.offset + sizeof(NameBody),
-                           entry.length) == text) {
-        auto &membership =
-            reinterpret_cast<NameBody *>(arena.get() + entry.offset)
-                ->countries[country / 64];
-        // Bits only change from zero to one. An observed one needs no write;
-        // fetch_or arbitrates exactly once when several workers see zero.
-        if (membership.load(std::memory_order_relaxed) & bit)
-          return false;
-        return !(membership.fetch_or(bit, std::memory_order_relaxed) & bit);
-      }
+        present = entry.prefix.load(std::memory_order_acquire);
+      if (present == key[0] && entry.tail == std::array{key[1], key[2], key[3]})
+        return !(entry.countries[country / 64].fetch_or(
+                     bit, std::memory_order_relaxed) &
+                 bit);
       slot = (slot + 1) & (capacity - 1);
     }
-    // Unbounded exact fallback for unusually large/skewed vocabularies. Slots
-    // are never removed, so a name that overflows follows this path thereafter.
-    std::lock_guard lock(mutex);
-    auto &word = overflow[text][country / 64];
-    bool added = !(word & bit);
-    word |= bit;
-    return added;
+    return fallback();
   }
 };
 struct Field {
   std::string_view bytes;
   size_t length;
 };
+__attribute__((target("avx2"))) const char *find_quote(const char *p,
+                                                       const char *end) {
+  if (end - p >= 32) {
+    auto block = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
+    uint32_t quotes =
+        _mm256_movemask_epi8(_mm256_cmpeq_epi8(block, _mm256_set1_epi8('"')));
+    if (quotes)
+      return p + std::countr_zero(quotes);
+    p += 32;
+  }
+  return static_cast<const char *>(memchr(p, '"', end - p));
+}
 Field field(const char *&p, const char *end) {
   const char *start = p;
   size_t escapes = 0;
   if (*p == '"') {
     start = ++p;
     for (;;) {
-      const char *quote = static_cast<const char *>(memchr(p, '"', end - p));
+      const char *quote = find_quote(p, end);
       if (!quote)
         throw std::runtime_error("unterminated quote");
       p = quote + 1;
@@ -184,7 +175,7 @@ int main(int argc, char **argv) {
     }
     std::vector<std::vector<Country>> groups(
         workers, std::vector<Country>(codes.size()));
-    NameTable names(input.size > 1000000 ? 262144 : 2048, input.size);
+    NameTable names(input.size > 1000000 ? 131072 : 2048);
     parallel(workers, [&](size_t t) {
       const char *q = boundary[t];
       while (q < boundary[t + 1]) {

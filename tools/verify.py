@@ -17,6 +17,18 @@ TRACKS = {"a": ("a_ingest", "summary.txt"), "b": ("b_index", "results.txt"), "c"
 def run(args):
     subprocess.run([str(a) for a in args], cwd=ROOT, check=True)
 
+
+def compile_entry(track, binary):
+    if track == "a":
+        run(["docker", "run", "--rm", "--network=none", "-v", f"{ROOT / 'track-a'}:/src:ro",
+             "-v", f"{binary.parent}:/output", "-w", "/src", "-e", "CARGO_TARGET_DIR=/tmp/target",
+             "-e", "RUSTFLAGS=-C target-cpu=x86-64-v3",
+             "rust:1-slim-trixie@sha256:1a939748a7cbab172de91a014e3804a97af1394a8c844faa67fce9401c4e40fb",
+             "sh", "-c", f"cargo build --release --locked --offline && cp /tmp/target/release/vayu-log /output/{binary.name}"])
+    else:
+        run(["g++", "-std=c++20", "-O3", "-march=x86-64-v3", "-DNDEBUG", "-pthread",
+             "-Wall", "-Wextra", "-Wpedantic", ROOT / f"track-{track}/main.cpp", "-o", binary])
+
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -58,7 +70,7 @@ def main():
     (ROOT / ".build").mkdir(exist_ok=True)
     records = []
     for track in args.tracks:
-        run(["g++", "-std=c++20", "-O3", "-march=x86-64-v3", "-DNDEBUG", "-pthread", "-Wall", "-Wextra", "-Wpedantic", ROOT / f"track-{track}/main.cpp", "-o", ROOT / ".build" / track])
+        compile_entry(track, ROOT / ".build" / track)
         mod = load_test(track)
         data = ROOT / ".data/edge" / track
         data.mkdir(parents=True, exist_ok=True)

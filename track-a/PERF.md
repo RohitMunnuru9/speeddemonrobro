@@ -84,3 +84,15 @@ input, official worked/edge cases, all methods, endpoint lengths 1..129, latency
 widths through UINT32_MAX, arbitrary hour returns and 1/6/12 workers. The actual
 offline Docker image also passes full public seed 1 under the sealed-run gates.
 Official measurement of the Rust candidate is pending.
+
+Rust receipt for a64a529: run-f012a8fc16f8, all gates passed,
+T=0.047742 s, M=23,322,624 bytes, S=363, K=30.882512, points=74.485631.
+Against 74f2b9b, wall time fell 14.1% and peak memory fell 47.3%; these gains
+include the algorithm/layout change as well as the Rust port.
+
+Next: retain twelve workers across all assigned hours, using one rendezvous
+channel per worker and an ordered writer. This removes per-hour thread startup
+and batch barriers while bounding pending output. Six warm alternating local
+runs gave median 0.06369 s versus 0.06949 s for batched Rust (about 8.3% lower).
+Both full public hashes and all twelve parser/ordering edge checks still pass.
+Official measurement of persistent workers is pending.

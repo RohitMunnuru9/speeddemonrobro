@@ -84,3 +84,8 @@ These development timings are not board predictions. Both public full seeds,
 the independent full seed 17, concurrent name duplicates, embedded LF/escaped
 quotes/empty names and deliberately colliding sampled hashes pass. The offline
 Docker full-public hash also passes. Official measurement is pending.
+
+Inline-key receipt for a64a529: run-762f662d461c, all gates passed,
+T=0.061856 s, M=13,987,840 bytes, S=354, K=24.586853, points=69.535147.
+This improves on the previous best 64.190483 points, with substantially less
+memory. It is a single public practice run, not the final holdout result.

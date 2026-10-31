@@ -89,3 +89,9 @@ Native RSS including mapped input fell to approximately 246 MB; development
 wall times varied substantially with load, so the board decides the tradeoff.
 The actual offline image passes the sealed full public hash check. Official
 measurement of this candidate is pending.
+
+Compact-CSR receipt for a64a529: run-de9af6b930ae, all gates passed,
+T=0.297302 s, M=139,333,632 bytes, S=441, K=15.990120, points=60.192587.
+Compared with the earlier best CSR run, time fell 28.4% and peak memory 20.9%.
+A compact binary-heap experiment was correct on the public full hash but slower
+in paired local runs and was rejected; radix heaps remain in production.

@@ -10,8 +10,10 @@ latency vector capacity are reused across hours.
 Bounded AVX2 loads find spaces and LF within a 64-byte record window; longer
 records and tails use scalar parsing. Known-length decimal conversion covers
 the full uint32 latency range. Small groups are sorted; larger groups use exact
-selection at the three nearest ranks. At most twelve hours of output are buffered,
-then written in order to one file without a second joined copy.
+selection at the three nearest ranks. Persistent workers send completed hours
+through rendezvous channels. Each worker can hold one pending output buffer,
+plus the writer's current buffer, so output is bounded and written in order
+without a second joined copy or a new thread for every hour.
 Endpoints sort bytewise. Duplicate records count separately; all ranks and rates
 use integer arithmetic.
 

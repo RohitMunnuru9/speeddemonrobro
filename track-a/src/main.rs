@@ -5,6 +5,7 @@ use std::fs::{self, File};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::io::{self, BufWriter, Write};
 use std::os::fd::AsRawFd;
+use std::sync::mpsc::sync_channel;
 use std::{env, ptr, slice, thread};
 
 extern "C" {
@@ -339,22 +340,29 @@ fn main() -> io::Result<()> {
             }
         }
     });
-    let mut states: Vec<Worker<'_>> = (0..workers).map(|_| Worker::default()).collect();
     fs::create_dir_all(out)?;
     let mut file = BufWriter::new(File::create(format!("{out}/summary.txt"))?);
-    for base in (0..72).step_by(workers) {
-        thread::scope(|scope| -> io::Result<()> {
-            let mut handles = Vec::new();
-            for (t, state) in states.iter_mut().enumerate().take(72 - base) {
-                let hour = base + t;
-                let hour_ranges = &ranges[hour];
-                handles.push(scope.spawn(move || solve_hour(bytes, hour_ranges, hour, state)));
-            }
-            for handle in handles {
-                file.write_all(&handle.join().unwrap())?;
-            }
-            Ok(())
-        })?;
-    }
+    thread::scope(|scope| -> io::Result<()> {
+        let mut receivers = Vec::new();
+        for t in 0..workers {
+            let (sender, receiver) = sync_channel(0);
+            receivers.push(receiver);
+            let ranges = &ranges;
+            scope.spawn(move || {
+                let mut state = Worker::default();
+                for hour in (t..72).step_by(workers) {
+                    let output = solve_hour(bytes, &ranges[hour], hour, &mut state);
+                    if sender.send(output).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        for hour in 0..72 {
+            let output = receivers[hour % workers].recv().map_err(io::Error::other)?;
+            file.write_all(&output)?;
+        }
+        Ok(())
+    })?;
     file.flush()
 }

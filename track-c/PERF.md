@@ -121,3 +121,26 @@ local difference requires an official comparison; exact key publication and
 membership semantics are unchanged.
 This experiment is not submitted; the best scored layout is retained while
 work prioritizes B and D.
+
+Priority changed to A/C. The selected C trial keeps exact 32-byte keys and the
+existing table size, but overlaps parsing with random memory access. Each
+worker retains 16 parsed records, prefetches region/home-slot addresses and
+retires records after that look-ahead. Hashing is done once; key publication,
+full equality and atomic membership remain unchanged. Queue wraparound and
+partial tails are drained in input order. Explicit inlining keeps the parser
+and retirement code in the same hot loop.
+
+The prefetch look-ahead idea was informed by Cache Me's public C write-up:
+https://github.com/manusingh090/speed-demon-2026-entry/blob/speed-demon/track-c/PERF.md
+This implementation was independently written; it retains exact complete keys,
+including the unbounded fallback, rather than probabilistic name identity.
+
+One alternating local comparison gave medians 0.17769 s versus 0.25539 s for
+the prior source (30.4% lower). Absolute local times are noisy and are not
+official measurements. Eight/32/64-record queues, a CSV structural scanner,
+and split short/long key tables did not improve on the selected 16-record
+queue. Tiny/sample/full seeds 1 and 2 and all CSV/concurrent-membership edge
+checks pass byte for byte. Official measurement is pending.
+
+The actual offline PGO Docker build also passes the sealed full-seed-1 run and
+the independent full seed-17 reference (61979ece5ecf40733491d28fd2022e6f04a85dd53c4629410dfeb48bc3d20591).

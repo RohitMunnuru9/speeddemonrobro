@@ -28,6 +28,12 @@ copy. Input tails use the original bounded copy; all name bytes remain exact.
 Notes are scanned without allocation. Input is mapped read-only, sums use 64-bit
 integers, countries without records are omitted, and output keys sort bytewise.
 
+A fixed 16-record look-ahead queue prefetches region bytes and the first name
+table slot before membership/aggregation. Retiring the queue in input order
+preserves all records, including short chunks and its final partial batch. The
+hash is calculated once; every hit still compares the complete key. The queue
+uses about 1 KiB per worker and does not retain a second copy of the input.
+
 No external dependencies. Optional arguments select input and output directories.
 The offline compiler profile comes from full-size generated seed-17 data; only the
 executable enters the final image. SD_THREADS supports 1-12 parsing workers.

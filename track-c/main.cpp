@@ -26,6 +26,25 @@ struct alignas(64) Name {
 // the padded 32-byte key injective even when a payload contains zero bytes.
 // Longer keys and crowded probe chains retain an unbounded exact fallback.
 struct NameTable {
+  __attribute__((always_inline)) inline uint64_t
+  prepare(std::string_view text) {
+    if (text.empty() || text.size() > 31)
+      return 0;
+    uint64_t first = 0, last = 0;
+    if (text.size() < 8)
+      memcpy(&first, text.data(), text.size());
+    else {
+      memcpy(&first, text.data(), 8);
+      memcpy(&last, text.data() + text.size() - 8, 8);
+    }
+    uint64_t hash = first ^ std::rotl(last, 29) ^ text.size();
+    hash ^= hash >> 33;
+    hash *= 0xff51afd7ed558ccdULL;
+    hash ^= hash >> 33;
+    __builtin_prefetch(&entries[hash & (capacity - 1)], 0, 1);
+    return hash;
+  }
+
   size_t capacity;
   std::unique_ptr<Name[]> entries;
   std::array<std::atomic<uint64_t>, 4> empty{};
@@ -33,8 +52,8 @@ struct NameTable {
   std::unordered_map<std::string_view, std::array<uint64_t, 4>> overflow;
   explicit NameTable(size_t size)
       : capacity(size), entries(std::make_unique<Name[]>(size)) {}
-  __attribute__((target("avx2"))) bool mark(std::string_view text,
-                                            size_t country, const char *end) {
+  __attribute__((target("avx2"), always_inline)) inline bool
+  mark(std::string_view text, size_t country, const char *end, uint64_t hash) {
     uint64_t bit = uint64_t{1} << (country % 64);
     if (text.empty())
       return !(empty[country / 64].fetch_or(bit, std::memory_order_relaxed) &
@@ -63,13 +82,6 @@ struct NameTable {
     reinterpret_cast<unsigned char *>(key.data())[31] = text.size();
     if (key[0] < 2)
       return fallback();
-    uint64_t last = 0;
-    if (text.size() >= 8)
-      memcpy(&last, text.data() + text.size() - 8, 8);
-    uint64_t hash = key[0] ^ std::rotl(last, 29) ^ text.size();
-    hash ^= hash >> 33;
-    hash *= 0xff51afd7ed558ccdULL;
-    hash ^= hash >> 33;
     size_t slot = hash & (capacity - 1);
     for (size_t probe = 0; probe < 128; ++probe) {
       auto &entry = entries[slot];
@@ -95,8 +107,8 @@ struct Field {
   std::string_view bytes;
   size_t length;
 };
-__attribute__((target("avx2"))) const char *find_quote(const char *p,
-                                                       const char *end) {
+__attribute__((target("avx2"), always_inline)) inline const char *
+find_quote(const char *p, const char *end) {
   if (end - p >= 32) {
     auto block = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
     uint32_t quotes =
@@ -107,7 +119,8 @@ __attribute__((target("avx2"))) const char *find_quote(const char *p,
   }
   return static_cast<const char *>(memchr(p, '"', end - p));
 }
-Field field(const char *&p, const char *end) {
+__attribute__((always_inline)) inline Field field(const char *&p,
+                                                  const char *end) {
   const char *start = p;
   size_t escapes = 0;
   if (*p == '"') {
@@ -189,6 +202,29 @@ int main(int argc, char **argv) {
     NameTable names(input.size > 1000000 ? 131072 : 2048);
     parallel(workers, [&](size_t t) {
       const char *q = boundary[t];
+      struct Pending {
+        uint64_t id;
+        int64_t cents;
+        Field name;
+        size_t note;
+        const uint8_t *region;
+        uint64_t hash;
+      };
+      std::array<Pending, 16> queue;
+      size_t seen = 0;
+      const uint8_t unknown = UINT8_MAX;
+      auto retire = [&](const Pending &r) __attribute__((always_inline)) {
+        size_t c = *r.region == UINT8_MAX ? unmatched : *r.region;
+        auto &g = groups[t][c];
+        ++g.count;
+        g.ids += r.id;
+        g.sum += r.cents;
+        g.lo = std::min(g.lo, r.cents);
+        g.hi = std::max(g.hi, r.cents);
+        g.name_bytes += r.name.length;
+        g.note_bytes += r.note;
+        g.names += names.mark(r.name.bytes, c, end, r.hash);
+      };
       while (q < boundary[t + 1]) {
         if (static_cast<unsigned char>(*q) == 0xEF)
           q += 3;
@@ -213,22 +249,18 @@ int main(int argc, char **argv) {
           ++q;
         if (q < end && *q == '\n')
           ++q;
-        size_t c = region < regions.size() && regions[region] != UINT8_MAX
-                       ? regions[region]
-                       : unmatched;
-        auto &g = groups[t][c];
-        ++g.count;
-        g.ids += id;
-        g.sum += cents;
-        g.lo = std::min(g.lo, cents);
-        g.hi = std::max(g.hi, cents);
-        g.name_bytes += name.length;
-        g.note_bytes += note.length;
-        // CSV quote escaping is injective: exact encoded-name equality is
-        // exact decoded-name equality. Empty quoted/unquoted views both have
-        // length 0.
-        g.names += names.mark(name.bytes, c, end);
+        const uint8_t *lookup =
+            region < regions.size() ? regions.data() + region : &unknown;
+        __builtin_prefetch(lookup, 0, 1);
+        uint64_t hash = names.prepare(name.bytes);
+        size_t slot = seen % queue.size();
+        if (seen >= queue.size())
+          retire(queue[slot]);
+        queue[slot] = {id, cents, name, note.length, lookup, hash};
+        ++seen;
       }
+      for (size_t i = seen - std::min(seen, queue.size()); i < seen; ++i)
+        retire(queue[i % queue.size()]);
     });
     for (size_t t = 1; t < workers; ++t) {
       for (size_t c = 0; c < codes.size(); ++c) {

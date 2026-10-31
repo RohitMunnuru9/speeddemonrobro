@@ -23,7 +23,8 @@ board scores or cgroup memory measurements.
 
 Use the `speed-demon` branch in one GitHub repository. Register that repository
 and tracks A, C and D with the organizers and install the Speed Demon Board app.
-The team field currently says `Rohit`; it must match the registered team name.
+The team field is `robro`; the submission repository is
+https://github.com/RohitMunnuru9/speeddemonrobro.
 Make the repository public under the included MIT license by code freeze.
 
 No board run has been recorded yet. Populate each track's PERF.md with actual

@@ -16,9 +16,11 @@ def run(args, **kwargs):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--label", default="sample-1")
+    parser.add_argument("--tracks", nargs="+", default=list(OUTPUT))
     args = parser.parse_args()
     evidence = []
-    for track, name in OUTPUT.items():
+    for track in args.tracks:
+        name = OUTPUT[track]
         run(["python", ROOT / "organizer/harness/dockerfile_check.py", ROOT / f"track-{track}/Dockerfile", ROOT / "organizer/harness/allowlist.json"])
         tag = f"speeddemon-local/{track}"
         run(["docker", "build", "--network=none", "-t", tag, ROOT / f"track-{track}"], timeout=600)

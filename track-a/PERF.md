@@ -105,3 +105,7 @@ Next build trial selects target-cpu=native during the offline build on the
 scoring host. The executable stays on that host, so its instruction target
 matches the machine which runs it. This changes compiler scheduling/selection
 without changing the data algorithm. Compare its official K with 32.423128.
+
+Native-target receipt for 3292dcb: run-341750182151, all gates passed,
+T=0.045457 s, M=22,077,440 bytes, S=371, K=31.893941, points=75.185409.
+No gain was established; restore x86-64-v3, whose previous K was higher.

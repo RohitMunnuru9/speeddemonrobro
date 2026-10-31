@@ -5,7 +5,15 @@ import time
 import urllib.request
 
 url = 'https://s3.amazonaws.com/raptors.dev/speeddemon.dev/2026/board/board.json'
-feed = json.load(urllib.request.urlopen(f'{url}?check={time.time_ns()}', timeout=30))
+for attempt in range(3):
+    try:
+        with urllib.request.urlopen(f'{url}?check={time.time_ns()}', timeout=30) as response:
+            feed = json.load(response)
+        break
+    except (json.JSONDecodeError, OSError):
+        if attempt == 2:
+            raise
+        time.sleep(1)
 Path('.results/board.json').write_text(json.dumps(feed, indent=2) + '\n')
 ranked = []
 for team in feed['teams']:

@@ -5,7 +5,7 @@ record boundary is removed. Embedded newlines and trailing spaces remain data.
 Regions map to compact country IDs through an integer array; unknown regions
 go to the unmatched group. Money is parsed and formatted in signed integer cents.
 
-Six workers parse record-aligned ranges. CRLF is a safe split point because the
+Twelve workers parse record-aligned ranges. CRLF is a safe split point because the
 generator contract excludes CR inside fields. Country aggregates are local per
 worker. Exact name views share a concurrent open-addressed table, with atomic
 country membership bits. Hash collisions compare bytes; a locked exact fallback

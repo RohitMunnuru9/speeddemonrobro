@@ -110,3 +110,14 @@ system load make the official peak essential. Both full public hashes and all
 9,000 independent graph answers pass. Packed search-state and packed radix-item
 experiments did not show a reliable sufficient gain and were rejected. Official
 time/memory/source tradeoff of transposition remains to be measured.
+
+Transpose receipt for 3292dcb: run-9fe8cfb181d0, all gates passed,
+T=0.482704 s, M=102,223,872 bytes, S=472, K=13.215555, points=56.054271.
+Peak memory fell, but time regressed sharply on the scoring box. Restore the
+dual-bucket CSR builder and original frontier/meeting policy from a64a529,
+whose K was 15.990120. This trial is not retained.
+
+Further local trials of a small membership filter and aggressive query-table
+shrinking did not establish a sufficient reliable end-to-end gain. They remain
+outside the submission. The retained runtime/build sources match the previously
+scored stronger configuration; experimental receipts are preserved above.

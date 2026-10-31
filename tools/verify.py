@@ -22,7 +22,7 @@ def compile_entry(track, binary):
     if track == "a":
         run(["docker", "run", "--rm", "--network=none", "-v", f"{ROOT / 'track-a'}:/src:ro",
              "-v", f"{binary.parent}:/output", "-w", "/src", "-e", "CARGO_TARGET_DIR=/tmp/target",
-             "-e", "RUSTFLAGS=-C target-cpu=native",
+             "-e", "RUSTFLAGS=-C target-cpu=x86-64-v3",
              "rust:1-slim-trixie@sha256:1a939748a7cbab172de91a014e3804a97af1394a8c844faa67fce9401c4e40fb",
              "sh", "-c", f"cargo build --release --locked --offline && cp /tmp/target/release/vayu-log /output/{binary.name}"])
     else:

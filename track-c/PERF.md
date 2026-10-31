@@ -95,3 +95,8 @@ T=0.060527 s, M=13,983,744 bytes, K=24.856772. Next trial uses six workers
 to compare one worker per physical core against twelve hardware threads.
 Linear probing remains: a quadratic-probing experiment did not provide a
 reliable sufficient local gain. Full public hashes also pass with six workers.
+
+Six-worker receipt for 3292dcb: run-d4353705ee04, all gates passed,
+T=0.083441 s, M=12,251,136 bytes, S=354, K=21.737969, points=66.860948.
+The smaller memory use did not repay lost throughput. Restore twelve workers,
+whose K was 24.856772.

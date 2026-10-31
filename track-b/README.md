@@ -7,6 +7,11 @@ and private reusable buffers provide exact zero-padded 32-byte word keys. A smal
 blocked Bloom filter skips definite dictionary misses; all possible matches
 still compare exact keys, so false positives cannot change answers.
 
+Document count comes from the supplied final dense document ID. Line-aligned
+parallel scans then populate document views by their actual IDs. Token starts
+and ends are enumerated from paired 32-byte classification masks, including
+words crossing a block boundary and the final zero sentinel.
+
 A runtime sample selects dense bitmaps for common terms and sorted posting lists
 for rare terms. This affects representation only. Twelve workers index disjoint
 document ranges aligned to 64-document boundaries, so bitmap word ownership is
@@ -16,7 +21,8 @@ per worker. If any estimate is too small, that term migrates to an exact growing
 overflow list. This permits one corpus pass without dropping any posting.
 Segmented views yield global IDs in document order without copying the lists.
 Each document appears once per term. A small
-runtime-selected cache accelerates frequent short token lookups with exact keys.
+runtime-selected cache accelerates frequent complete token lookups with exact
+32-byte keys, including words longer than eight bytes.
 
 Boolean operators execute strictly left to right. Mixed bitmap/list operations
 preserve set semantics. Bitmap counts/sums use AVX2 nibble lookups and exact

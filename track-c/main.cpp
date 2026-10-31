@@ -33,7 +33,8 @@ struct NameTable {
   std::unordered_map<std::string_view, std::array<uint64_t, 4>> overflow;
   explicit NameTable(size_t size)
       : capacity(size), entries(std::make_unique<Name[]>(size)) {}
-  bool mark(std::string_view text, size_t country) {
+  __attribute__((target("avx2"))) bool mark(std::string_view text,
+                                            size_t country, const char *end) {
     uint64_t bit = uint64_t{1} << (country % 64);
     if (text.empty())
       return !(empty[country / 64].fetch_or(bit, std::memory_order_relaxed) &
@@ -48,7 +49,17 @@ struct NameTable {
     if (text.size() > 31)
       return fallback();
     std::array<uint64_t, 4> key{};
-    memcpy(key.data(), text.data(), text.size());
+    if (end - text.data() >= 32) {
+      const auto indices = _mm256_setr_epi8(
+          0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+          20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
+      auto keep = _mm256_cmpgt_epi8(_mm256_set1_epi8(text.size()), indices);
+      auto bytes =
+          _mm256_loadu_si256(reinterpret_cast<const __m256i *>(text.data()));
+      _mm256_storeu_si256(reinterpret_cast<__m256i *>(key.data()),
+                          _mm256_and_si256(bytes, keep));
+    } else
+      memcpy(key.data(), text.data(), text.size());
     reinterpret_cast<unsigned char *>(key.data())[31] = text.size();
     if (key[0] < 2)
       return fallback();
@@ -216,7 +227,7 @@ int main(int argc, char **argv) {
         // CSV quote escaping is injective: exact encoded-name equality is
         // exact decoded-name equality. Empty quoted/unquoted views both have
         // length 0.
-        g.names += names.mark(name.bytes, c);
+        g.names += names.mark(name.bytes, c, end);
       }
     });
     for (size_t t = 1; t < workers; ++t) {

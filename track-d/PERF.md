@@ -121,3 +121,16 @@ Further local trials of a small membership filter and aggressive query-table
 shrinking did not establish a sufficient reliable end-to-end gain. They remain
 outside the submission. The retained runtime/build sources match the previously
 scored stronger configuration; experimental receipts are preserved above.
+
+Next candidate combines the two directional search-state tables. Each entry
+holds both uint64 distances, so a relaxation returns its opposite distance
+without a second hash probe. Stale-heap checks likewise read both values in one
+lookup. A shared epoch and exact node comparison retain the original Dijkstra
+and stopping rules. Temporary bucket reserve drops from 20% to 5% slack, with
+the existing exact overflow preserving every edge under skewed counts.
+
+Three alternating native runs of the combined-state change before reserve
+tuning gave median 0.5981 s against 0.6385 s for the prior source (about 6.3%
+lower). Further packed-arc and membership-filter variants did not establish
+a sufficient gain and were not selected. Both public full hashes and
+tiny/sample seeds 1/2 pass. Official measurement is pending.

@@ -23,6 +23,8 @@ locked fallback without a name-length limit. Empty names share a separate mask.
 Country IDs fit in a byte (240 countries plus the unmatched group). Hash hits
 compare all padded key bytes. A bounded AVX2 quote scan handles short fields;
 longer fields continue through libc byte search.
+Short name keys use a bounded AVX2 load and a length mask instead of a variable
+copy. Input tails use the original bounded copy; all name bytes remain exact.
 Notes are scanned without allocation. Input is mapped read-only, sums use 64-bit
 integers, countries without records are omitted, and output keys sort bytewise.
 

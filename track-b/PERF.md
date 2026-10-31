@@ -56,3 +56,18 @@ are validation gates. Local native full runs were around 1.3-1.5 s and 370 MB
 RSS including mapped input; extra reserve/position memory must earn its cost on
 the board. Training now uses full seed-17 data. Larger direct hot-token caches
 showed little benefit and were not retained. Official measurement is pending.
+
+Retained-layout receipt at f7fa9d4: run-37ee293238cc, all gates passed,
+T=0.561159 s, M=136,093,696 bytes, S=834, K=12.540356, points=54.915493.
+
+Next candidate enumerates start/end bitmaps over paired classification blocks
+instead of repeatedly shifting/reloading masks for each word. A cache-line-sized
+hot entry compares all 32 key bytes, extending runtime-sampled cache coverage
+to long words. Dense ordered IDs permit reading the document count from the
+last line, then constructing views through line-aligned parallel scans. Every
+ID and text still comes from the supplied input.
+
+Three warm alternating native runs before the document-scan change gave median
+0.8010 s against 0.8548 s for the prior source (about 6.3% lower). A larger hot
+cache was not faster and was rejected. Public full output and tiny/sample seeds
+1/2 remain byte-exact. Official time, memory and source tradeoff is pending.

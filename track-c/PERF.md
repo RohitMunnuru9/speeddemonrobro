@@ -100,3 +100,10 @@ Six-worker receipt for 3292dcb: run-d4353705ee04, all gates passed,
 T=0.083441 s, M=12,251,136 bytes, S=354, K=21.737969, points=66.860948.
 The smaller memory use did not repay lost throughput. Restore twelve workers,
 whose K was 24.856772.
+
+Next candidate constructs short padded name keys through a bounded AVX2 load
+and byte-length mask. The last input bytes use the original copy path. Names
+over 31 bytes still use the exact map; key length tags and country masks are
+unchanged. Three alternating native runs gave median 0.09837 s against
+0.11004 s for the previous source (about 10.6% lower). Both full public hashes
+and tiny/sample seeds 1/2 pass. Official measurement is pending.

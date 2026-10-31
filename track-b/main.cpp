@@ -107,8 +107,8 @@ __attribute__((target("avx2"))) void tokenize(std::string_view text,
     lower = std::make_unique_for_overwrite<char[]>(capacity);
   }
   size_t blocks = (text.size() + 31) / 32;
-  masks.resize(blocks + 1);
-  masks[blocks] = 0;
+  masks.resize(blocks + 2);
+  masks[blocks] = masks[blocks + 1] = 0;
   auto classify = [&](auto raw, size_t block) {
     auto folded = _mm256_or_si256(raw, _mm256_set1_epi8(32));
     auto letters =
@@ -137,19 +137,8 @@ __attribute__((target("avx2"))) void tokenize(std::string_view text,
   const auto positions = _mm256_setr_epi8(
       0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
       21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
-  size_t at = 0;
-  while (at < text.size()) {
-    uint32_t mask = masks[at / 32] >> (at % 32);
-    if (!mask) {
-      at = (at / 32 + 1) * 32;
-      continue;
-    }
-    at += std::countr_zero(mask);
-    size_t first = at;
-    at += std::countr_one(masks[at / 32] >> (at % 32));
-    while (at < text.size() && at % 32 == 0 && (masks[at / 32] & 1))
-      at += std::countr_one(masks[at / 32]);
-    size_t size = at - first;
+  auto emit = [&](size_t first, size_t last) {
+    size_t size = last - first;
     if (size > 32)
       throw std::runtime_error("token exceeds spec bound");
     auto key = _mm256_loadu_si256(
@@ -160,9 +149,34 @@ __attribute__((target("avx2"))) void tokenize(std::string_view text,
                         _mm256_and_si256(key, keep));
     if constexpr (std::is_invocable_r_v<bool, F, std::string_view, size_t>) {
       if (!consume(std::string_view(bytes, size), first))
-        return;
+        return false;
     } else if (!consume(std::string_view(bytes, size)))
-      return;
+      return false;
+    return true;
+  };
+  size_t pending = 0;
+  uint64_t carry = 0;
+  for (size_t block = 0; block <= blocks; block += 2) {
+    uint64_t mask = uint64_t(masks[block]) | (uint64_t(masks[block + 1]) << 32);
+    uint64_t shifted = (mask << 1) | carry;
+    uint64_t starts = mask & ~shifted, ends = ~mask & shifted;
+    size_t base = block * 32;
+    if (carry && ends) {
+      if (!emit(pending, base + std::countr_zero(ends)))
+        return;
+      ends &= ends - 1;
+    }
+    while (ends) {
+      size_t first = base + std::countr_zero(starts),
+             last = base + std::countr_zero(ends);
+      if (!emit(first, last))
+        return;
+      starts &= starts - 1;
+      ends &= ends - 1;
+    }
+    if (starts)
+      pending = base + std::countr_zero(starts);
+    carry = mask >> 63;
   }
 }
 struct Query {
@@ -359,7 +373,11 @@ int main(int argc, char **argv) {
       table[slot] = {keys[id].a, id, keys[id].b != 0};
     }
     std::unordered_map<std::string_view, uint32_t>().swap(dictionary);
-    std::array<TermSlot, 256> hot{};
+    struct alignas(64) Hot {
+      Key key;
+      uint32_t id = 0;
+    };
+    std::array<Hot, 256> hot{};
     auto hot_slot = [](uint64_t prefix) {
       return (prefix * 0x9e3779b97f4a7c15ULL) >> 56;
     };
@@ -369,11 +387,9 @@ int main(int argc, char **argv) {
       // identity.
       Key key;
       memcpy(&key, token.data(), sizeof(key));
-      if (!key.b) {
-        const auto &cached = hot[hot_slot(key.a)];
-        if (cached.prefix == key.a)
-          return cached.id;
-      }
+      const auto &cached = hot[hot_slot(key.a)];
+      if (cached.key == key)
+        return cached.id;
       uint64_t hash = key_hash(key);
       uint64_t mask =
           (uint64_t{1} << (hash & 63)) | (uint64_t{1} << ((hash >> 6) & 63));
@@ -390,18 +406,34 @@ int main(int argc, char **argv) {
       return UINT32_MAX;
     };
     // PROFILE_PREPARED_QUERIES
-    const size_t documents =
-        std::count(corpus.data, corpus.data + corpus.size, '\n');
-    std::vector<std::string_view> texts(documents);
-    const char *line = corpus.data;
-    for (size_t id = 0; id < documents; ++id) {
-      const char *tab = static_cast<const char *>(
-          memchr(line, '\t', corpus.data + corpus.size - line));
-      const char *newline = static_cast<const char *>(
-          memchr(tab + 1, '\n', corpus.data + corpus.size - tab - 1));
-      texts[id] = {tab + 1, size_t(newline - tab - 1)};
-      line = newline + 1;
+    size_t documents = 0;
+    if (corpus.size) {
+      const char *last = corpus.data + corpus.size - 1;
+      while (last > corpus.data && last[-1] != '\n')
+        --last;
+      documents = number(last) + 1;
     }
+    std::vector<std::string_view> texts(documents);
+    size_t scanners = corpus.size > 1000000 ? 12 : 1;
+    parallel(scanners, [&](size_t t) {
+      const char *end = corpus.data + corpus.size;
+      auto boundary = [&](size_t part) {
+        const char *p = corpus.data + corpus.size * part / scanners;
+        if (part && part < scanners)
+          while (p < end && *p++ != '\n') {
+          }
+        return p;
+      };
+      const char *line = boundary(t), *stop = boundary(t + 1);
+      while (line < stop) {
+        size_t id = number(line);
+        ++line;
+        const char *newline =
+            static_cast<const char *>(memchr(line, '\n', stop - line));
+        texts[id] = {line, size_t(newline - line)};
+        line = newline + 1;
+      }
+    });
     // Sample current input to choose representations before building postings.
     // The choice changes storage only; no term or document is omitted.
     IDs sample_frequency(words.size()), sample_tokens(words.size()),
@@ -434,10 +466,10 @@ int main(int argc, char **argv) {
       }
     std::vector<std::vector<uint64_t>> bitmaps(words.size());
     for (uint32_t term = 0; term < words.size(); ++term)
-      if (!keys[term].b && sample_tokens[term]) {
+      if (sample_tokens[term]) {
         auto &entry = hot[hot_slot(keys[term].a)];
-        if (!entry.prefix || sample_tokens[term] > sample_tokens[entry.id])
-          entry = {keys[term].a, term, 0};
+        if (!entry.key.a || sample_tokens[term] > sample_tokens[entry.id])
+          entry = {keys[term], term};
       }
     for (size_t term = 0; term < words.size(); ++term)
       if (sample_frequency[term] > sample_count / 64)

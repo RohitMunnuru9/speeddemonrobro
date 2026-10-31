@@ -15,8 +15,10 @@ reducing adjacency traffic on ordinary roads. Vertex degrees have no inline limi
 
 Queries use bidirectional Dijkstra with uint64 distances and monotone radix heaps.
 Twelve workers claim queries from an atomic counter. Each worker keeps an exact
-flat hash table of visited nodes in each direction. Generation tags clear a
-query logically, and the tables grow when needed. State therefore follows the
+flat hash table of visited nodes containing both directional distances. A
+relaxation returns the opposite distance from the same lookup, and stale-heap
+checks read both distances together. Generation tags clear a
+query logically, and the table grows when needed. State therefore follows the
 largest search handled by a worker rather than the full graph. Collisions compare
 node IDs, and distances remain uint64 values. The smaller frontier is expanded; termination
 requires the two heap minima to reach the best complete path found. Results

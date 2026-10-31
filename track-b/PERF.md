@@ -1,7 +1,7 @@
 # Optimization log: B
 
 Written October 31, 2026, during the event window. This fourth entry is a candidate
-for the best-three overall score; board registration/measurement is pending.
+for the best-three overall score; all four tracks are registered.
 
 1. First correct query-aware posting-list implementation passed the official
 worked example, tiny and sample seeds 1/2, and the published full seed-1 output
@@ -19,5 +19,20 @@ input pages). These local numbers are not cgroup memory or board scores.
 Published full output hash:
 f86973c210228141bcb6f1f1b10188ad2a9b65f71e7cd7cf4590b38de4e80927
 
-No board run ID or official improvement is claimed yet. Every index is built
-from the runtime input, and both query and corpus bytes can vary with the seed.
+First board receipt, cf4fee3: run-8a003e6e528d, all gates passed,
+T=0.825134 s, M=143,810,560 bytes, S=536, D=1, K=10.929498,
+points=51.930011. This is the official baseline for subsequent changes.
+
+Current candidate: exact 16-bit block-relative postings, a counting/filling
+allocation strategy, lazy segmented views, and a runtime-selected short-token
+cache. Full public output matches the published hash; native full runs were
+about 1.41-1.43 s. An LTO/profile-guided build trained on a generated seed-17
+sample had local Docker process medians of 1.167 s (6 workers) and 1.125 s
+(12 workers), with local cgroup peaks about 88 MB. The prior board baseline
+used 143.8 MB officially; these different environments are not directly
+comparable. Twelve workers are selected for the next official trial.
+
+Rejected runtime rare-anchor/DNF planner: full output stayed correct, but
+rechecking raw text raised native full time to 2.92-3.19 s. It is not retained.
+Every index is built from the runtime input, and corpus/query bytes can vary
+with the seed. No precomputed index or answer file is included.

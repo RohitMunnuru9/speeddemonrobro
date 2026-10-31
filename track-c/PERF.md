@@ -32,3 +32,13 @@ T=0.113590 s, M=19,742,720 bytes, S=310, K=17.275824, points=61.871939.
 This is 8.56x faster than the first board baseline; K rose from 6.782354.
 Next candidate aligns shared entries to cache lines and preserves hash low-bit
 entropy. All existing correctness checks still pass; board measurement pending.
+
+Board confirmation for cf4fee3: run-366e3b2fb77a, all gates passed,
+T=0.098094 s, M=21,639,168 bytes, S=312, K=18.234840, points=63.045098.
+
+Current candidate replaces cache-line padding with compact keys copied once into
+an arena and uses LTO/profile guidance from a generated seed-17 sample. Local
+Docker process medians were 0.155 s with 6 workers and 0.144 s with 12, with local
+cgroup peaks about 20.3/20.6 MB. Docker has only four CPUs here, so these are not
+predictions of the scoring machine. We selected 12 workers for a board trial.
+Full seeds 1/2 and concurrent duplicate-name tests remain correctness gates.

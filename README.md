@@ -22,13 +22,18 @@ board scores or cgroup memory measurements.
 
 ## Submission setup
 
-Use the `speed-demon` branch in one GitHub repository. Tracks A, C and D are
-registered and scored. Track B is a validated fourth candidate awaiting its
-registration update. Install the Speed Demon Board app on the repository.
+Use the `speed-demon` branch in one GitHub repository. Tracks A, B, C and D are
+registered and scored. Install the Speed Demon Board app on the repository.
 The team field is `vayu`; the submission repository is
 https://github.com/RohitMunnuru9/speeddemonrobro.
 Make the repository public under the included MIT license by code freeze.
 
-All three tracks passed their first organizer board run on October 31, 2026.
+All four tracks passed organizer board runs on October 31, 2026.
 Each track's PERF.md records its exact run ID and measurements. Local measurements
 and practice-board results are distinct from final holdout scoring.
+
+The offline builds use compiler profile guidance from an independently generated
+seed-17 sample. Only the compiled executable enters the final image; it builds
+all data structures from the supplied runtime files. The training generators are
+byte-identical copies of the published organizer sources, excluded from S under
+the published-copies rule. No training outputs or precomputed answers are shipped.

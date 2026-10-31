@@ -26,4 +26,10 @@ and source lines; K improved from 9.326661 to 15.144617.
 Next: profiling found repeated serial endpoint lookup consumed about 0.10 s
 locally. Resolve each worker's endpoint once for all 72 hours, use a flat exact
 endpoint table and a short-window hash with full byte collision checks. Local
-merge time fell to about 0.02-0.03 s. Both full seeds still match. Board pending.
+merge time fell to about 0.02-0.03 s. Both full seeds still match.
+
+Board confirmation for cf4fee3: run-6c8468e0b768, all gates passed,
+T=0.099913 s, M=53,575,680 bytes, S=300, K=18.600802, points=63.476583.
+This is 7.03x faster than the first board baseline. The current build adds LTO
+and profile guidance from a build-time seed-17 sample. Full seeds 1/2 still pass;
+the profile-guided candidate awaits its own board measurement.

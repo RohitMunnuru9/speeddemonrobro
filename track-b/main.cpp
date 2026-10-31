@@ -1,15 +1,79 @@
 #include "io.hpp"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
+#include <cstdlib>
 #include <filesystem>
 #include <immintrin.h>
 #include <iostream>
+#include <iterator>
 #include <numeric>
 #include <string_view>
 #include <unordered_map>
 
 using IDs = std::vector<uint32_t>;
+using ShortIDs = std::vector<uint16_t>;
+struct PostingStore {
+  const ShortIDs *values;
+  const IDs *offsets, *starts;
+  size_t terms, workers;
+};
+struct PostingView {
+  const PostingStore *store = nullptr;
+  size_t term = 0, count = 0;
+  struct Iterator {
+    using iterator_category = std::input_iterator_tag;
+    using value_type = uint32_t;
+    using difference_type = std::ptrdiff_t;
+    using reference = uint32_t;
+    using pointer = void;
+    const PostingView *view;
+    size_t worker = 0, position = 0;
+    void skip() {
+      while (worker < view->store->workers) {
+        size_t key = worker * view->store->terms + view->term;
+        if (position <
+            (*view->store->offsets)[key + 1] - (*view->store->offsets)[key])
+          break;
+        ++worker;
+        position = 0;
+      }
+    }
+    uint32_t operator*() const {
+      size_t key = worker * view->store->terms + view->term;
+      return (*view->store->starts)[worker] +
+             (*view->store->values)[(*view->store->offsets)[key] + position];
+    }
+    Iterator &operator++() {
+      ++position;
+      skip();
+      return *this;
+    }
+    Iterator operator++(int) {
+      auto old = *this;
+      ++*this;
+      return old;
+    }
+    bool operator==(const Iterator &) const = default;
+  };
+  Iterator begin() const {
+    Iterator i{this};
+    i.skip();
+    return i;
+  }
+  Iterator end() const { return {this, store->workers, 0}; }
+  size_t size() const { return count; }
+  bool contains(uint32_t doc) const {
+    size_t worker =
+        std::upper_bound(store->starts->begin(), store->starts->end(), doc) -
+        store->starts->begin() - 1;
+    size_t key = worker * store->terms + term;
+    auto first = store->values->begin() + (*store->offsets)[key];
+    auto last = store->values->begin() + (*store->offsets)[key + 1];
+    return std::binary_search(first, last, doc - (*store->starts)[worker]);
+  }
+};
 bool word_byte(unsigned char c) {
   return (c >= '0' && c <= '9') || ((c | 32) >= 'a' && (c | 32) <= 'z');
 }
@@ -78,8 +142,9 @@ uint64_t key_hash(Key k) {
   return h ? h : 1;
 }
 struct TermSlot {
-  uint64_t hash = 0;
+  uint64_t prefix = 0;
   uint32_t id = 0;
+  uint32_t long_key = 0;
 };
 std::string format(const IDs &ids) {
   std::string out;
@@ -89,6 +154,19 @@ std::string format(const IDs &ids) {
   for (size_t i = 0; i < std::min<size_t>(10, ids.size()); ++i) {
     out += ' ';
     append(out, ids[i]);
+  }
+  out += '\n';
+  return out;
+}
+std::string format(const PostingView &ids) {
+  std::string out;
+  append(out, ids.size());
+  out += ' ';
+  append(out, std::accumulate(ids.begin(), ids.end(), uint64_t{0}));
+  auto it = ids.begin();
+  for (size_t i = 0; i < std::min<size_t>(10, ids.size()); ++i, ++it) {
+    out += ' ';
+    append(out, *it);
   }
   out += '\n';
   return out;
@@ -183,99 +261,134 @@ int main(int argc, char **argv) {
       memcpy(&keys[id], words[id].data(), words[id].size());
       uint64_t hash = key_hash(keys[id]);
       size_t slot = hash & (capacity - 1);
-      while (table[slot].hash)
+      while (table[slot].prefix)
         slot = (slot + 1) & (capacity - 1);
-      table[slot] = {hash, id};
+      table[slot] = {keys[id].a, id, keys[id].b != 0};
     }
     std::unordered_map<std::string_view, uint32_t>().swap(dictionary);
+    std::array<TermSlot, 256> hot{};
+    auto hot_slot = [](uint64_t prefix) {
+      return (prefix * 0x9e3779b97f4a7c15ULL) >> 56;
+    };
     auto lookup_term = [&](std::string_view token) {
       // tokenize supplies a fully initialized, zero-padded 32-byte key. ASCII
       // alphanumerics contain no zero, so padding preserves exact token
       // identity.
       Key key;
       memcpy(&key, token.data(), sizeof(key));
+      if (!key.b) {
+        const auto &cached = hot[hot_slot(key.a)];
+        if (cached.prefix == key.a)
+          return cached.id;
+      }
       uint64_t hash = key_hash(key);
       size_t slot = hash & (capacity - 1);
-      while (table[slot].hash &&
-             (table[slot].hash != hash || keys[table[slot].id] != key))
+      while (table[slot].prefix) {
+        const auto &entry = table[slot];
+        if (entry.prefix == key.a &&
+            ((!key.b && !entry.long_key) || keys[entry.id] == key))
+          return entry.id;
         slot = (slot + 1) & (capacity - 1);
-      return table[slot].hash ? table[slot].id : UINT32_MAX;
+      }
+      return UINT32_MAX;
     };
+    // PROFILE_PREPARED_QUERIES
     const size_t documents =
         std::count(corpus.data, corpus.data + corpus.size, '\n');
     std::vector<std::string_view> texts(documents);
+    const char *line = corpus.data;
+    for (size_t id = 0; id < documents; ++id) {
+      const char *tab = static_cast<const char *>(
+          memchr(line, '\t', corpus.data + corpus.size - line));
+      const char *newline = static_cast<const char *>(
+          memchr(tab + 1, '\n', corpus.data + corpus.size - tab - 1));
+      texts[id] = {tab + 1, size_t(newline - tab - 1)};
+      line = newline + 1;
+    }
     // Sample current input to choose representations before building postings.
     // The choice changes storage only; no term or document is omitted.
-    IDs sample_frequency(words.size()), sample_last(words.size(), UINT32_MAX);
+    IDs sample_frequency(words.size()), sample_tokens(words.size()),
+        sample_last(words.size(), UINT32_MAX);
     size_t sample_count = std::min<size_t>(4096, documents);
-    const char *sample = corpus.data;
     for (size_t i = 0; i < sample_count; ++i) {
-      uint32_t id = number(sample);
-      ++sample;
-      const char *newline = static_cast<const char *>(
-          memchr(sample, '\n', corpus.data + corpus.size - sample));
-      tokenize(std::string_view(sample, newline - sample),
-               [&](std::string_view token) {
-                 uint32_t term = lookup_term(token);
-                 if (term != UINT32_MAX && sample_last[term] != id) {
-                   sample_last[term] = id;
-                   ++sample_frequency[term];
-                 }
-                 return true;
-               });
-      sample = newline + 1;
+      uint32_t id = i;
+      tokenize(texts[id], [&](std::string_view token) {
+        uint32_t term = lookup_term(token);
+        if (term != UINT32_MAX)
+          ++sample_tokens[term];
+        if (term != UINT32_MAX && sample_last[term] != id) {
+          sample_last[term] = id;
+          ++sample_frequency[term];
+        }
+        return true;
+      });
     }
     std::vector<std::vector<uint64_t>> bitmaps(words.size());
+    for (uint32_t term = 0; term < words.size(); ++term)
+      if (!keys[term].b && sample_tokens[term]) {
+        auto &entry = hot[hot_slot(keys[term].a)];
+        if (!entry.prefix || sample_tokens[term] > sample_tokens[entry.id])
+          entry = {keys[term].a, term, 0};
+      }
     for (size_t term = 0; term < words.size(); ++term)
       if (sample_frequency[term] > sample_count / 64)
         bitmaps[term].resize((documents + 63) / 64);
-    const size_t workers = corpus.size > 1000000 ? 6 : 1;
-    std::vector<const char *> boundaries(workers + 1,
-                                         corpus.data + corpus.size);
-    boundaries[0] = corpus.data;
-    for (size_t t = 1; t < workers; ++t) {
-      const char *q = corpus.data + corpus.size * t / workers;
-      while (q < corpus.data + corpus.size && *q++ != '\n') {
-      }
-      // Each worker owns whole bitmap words, so writes need no atomics.
-      while (q < corpus.data + corpus.size) {
-        const char *id_pointer = q;
-        uint32_t id = number(id_pointer);
-        if (id % 64 == 0)
-          break;
-        q = static_cast<const char *>(
-                memchr(q, '\n', corpus.data + corpus.size - q)) +
-            1;
-      }
-      boundaries[t] = q;
-    }
-    std::vector<std::vector<IDs>> local(workers,
-                                        std::vector<IDs>(words.size()));
-    parallel(workers, [&](size_t t) {
-      IDs last(words.size(), UINT32_MAX);
-      const char *q = boundaries[t];
-      while (q < boundaries[t + 1]) {
-        uint32_t id = number(q);
-        ++q;
-        const char *newline =
-            static_cast<const char *>(memchr(q, '\n', boundaries[t + 1] - q));
-        texts[id] = {q, size_t(newline - q)};
-        q = newline + 1;
+    size_t workers = corpus.size > 1000000 ? 6 : 1;
+    if (const char *env = std::getenv("SD_THREADS"))
+      workers = std::clamp(std::atoi(env), 1, 12);
+    workers = std::max(workers, (documents + 65471) / 65472);
+    if (workers > 12)
+      throw std::runtime_error("corpus exceeds spec scale");
+    size_t span = ((documents + workers * 64 - 1) / (workers * 64)) * 64;
+    if (span > UINT16_MAX)
+      throw std::runtime_error("posting block exceeds spec scale");
+    IDs starts(workers + 1);
+    for (size_t t = 0; t <= workers; ++t)
+      starts[t] = std::min(documents, span * t);
+    // Each block owns whole bitmap words and stores sparse document IDs as
+    // exact uint16 offsets. Views merge blocks lazily, avoiding a full copy of
+    // postings.
+    ShortIDs counts(workers * words.size()), values;
+    IDs offsets, cursors;
+    auto index_documents = [&](size_t t, bool fill) {
+      ShortIDs last(words.size(), UINT16_MAX);
+      for (uint32_t id = starts[t]; id < starts[t + 1]; ++id) {
+        uint16_t relative = id - starts[t];
         tokenize(texts[id], [&](std::string_view token) {
           uint32_t term = lookup_term(token);
-          if (term != UINT32_MAX) {
-            if (!bitmaps[term].empty())
-              bitmaps[term][id / 64] |= uint64_t{1} << (id % 64);
-            else if (last[term] != id) {
-              last[term] = id;
-              local[t][term].push_back(id);
-            }
+          if (term == UINT32_MAX || (fill && !bitmaps[term].empty()) ||
+              last[term] == relative)
+            return true;
+          last[term] = relative;
+          if (!bitmaps[term].empty())
+            bitmaps[term][id / 64] |= uint64_t{1} << (id % 64);
+          else {
+            size_t key = t * words.size() + term;
+            if (fill)
+              values[cursors[key]++] = relative;
+            else
+              ++counts[key];
           }
           return true;
         });
       }
-    });
-    std::vector<IDs> postings(words.size());
+    };
+    parallel(workers, [&](size_t t) { index_documents(t, false); });
+    offsets.resize(counts.size() + 1);
+    uint32_t total = 0;
+    for (size_t i = 0; i < counts.size(); ++i) {
+      offsets[i] = total;
+      total += counts[i];
+    }
+    offsets.back() = total;
+    values.resize(total);
+    cursors = offsets;
+    parallel(workers, [&](size_t t) { index_documents(t, true); });
+    ShortIDs().swap(counts);
+    IDs().swap(cursors);
+    // PROFILE_INDEX_DONE
+    PostingStore store{&values, &offsets, &starts, words.size(), workers};
+    std::vector<PostingView> postings(words.size());
     std::atomic<size_t> next{0};
     parallel(workers, [&](size_t) {
       for (;;) {
@@ -283,17 +396,13 @@ int main(int argc, char **argv) {
         if (term >= words.size())
           break;
         size_t count = 0;
-        for (auto &worker : local)
-          count += worker[term].size();
-        auto &target = postings[term];
-        target.reserve(count);
-        for (auto &worker : local) {
-          target.insert(target.end(), worker[term].begin(), worker[term].end());
-          IDs().swap(worker[term]);
+        for (size_t t = 0; t < workers; ++t) {
+          size_t key = t * words.size() + term;
+          count += offsets[key + 1] - offsets[key];
         }
+        postings[term] = {&store, term, count};
       }
     });
-    std::vector<std::vector<IDs>>().swap(local);
     IDs frequencies(words.size());
     next = 0;
     parallel(workers, [&](size_t) {
@@ -306,6 +415,7 @@ int main(int argc, char **argv) {
           frequencies[term] += std::popcount(w);
       }
     });
+    // PROFILE_READY_TO_QUERY
     std::vector<std::string> output(queries.size());
     next = 0;
     parallel(workers, [&](size_t) {
@@ -400,12 +510,10 @@ int main(int argc, char **argv) {
             bool candidate = true;
             for (auto term : q.terms)
               if (term != anchor) {
-                bool contains =
-                    bitmaps[term].empty()
-                        ? std::binary_search(postings[term].begin(),
-                                             postings[term].end(), doc)
-                        : bool(bitmaps[term][doc / 64] &
-                               (uint64_t{1} << (doc % 64)));
+                bool contains = bitmaps[term].empty()
+                                    ? postings[term].contains(doc)
+                                    : bool(bitmaps[term][doc / 64] &
+                                           (uint64_t{1} << (doc % 64)));
                 if (!contains) {
                   candidate = false;
                   break;
@@ -446,6 +554,7 @@ int main(int argc, char **argv) {
         output[i] = format(a);
       }
     });
+    // PROFILE_QUERIES_DONE
     std::string joined;
     joined.reserve(order.size() * 32);
     for (auto i : order)

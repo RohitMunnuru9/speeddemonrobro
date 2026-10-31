@@ -29,6 +29,13 @@ random scatter, and packs exact distances plus generation tags into one word.
 The distance bit width follows (n-1)*UINT32_MAX and generation wrap clears tags.
 Both full seeds and independent graph tests pass. Board measurement pending.
 
+Board confirmation for cf4fee3: run-1b7777c4fd9b, all gates passed,
+T=0.557152 s, M=210,890,752 bytes, S=318, K=11.291853, points=52.638260.
+The current build adds LTO/profile guidance from a generated seed-17 sample.
+Local four-CPU Docker medians for 4/6/12 query workers were 0.651/0.623/0.679 s,
+with local cgroup peaks 210.9/267.6/438.7 MB. Four workers retain the best local
+time-memory tradeoff, and remain the default. Official PGO measurement is pending.
+
 Rejected local experiments: BFS vertex ordering reduced query time but added too
 much preprocessing (roughly 0.9-1.1 s build); degree-two contraction reduced full
 nodes from 1,740,512 to 1,342,958 but increased total time; pruning unqueried

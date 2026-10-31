@@ -17,3 +17,13 @@ latency array, exact selection and buffered parallel formatting. Full-size seeds
 1 and 2 match the reference. Local full-seed-1 runtime is about 0.25-0.40 s on
 the native WSL filesystem; these timings are not the scoring machine. Board
 measurement pending; compare against run-9b28b732aad3.
+
+Board confirmation for commit 3cb973f: run-f0f7b72f46d4, all gates passed,
+T=0.161052 s, M=52,199,424 bytes, S=249, K=15.144617, points=59.012914.
+This is 4.36x faster than the first recorded board baseline, with more memory
+and source lines; K improved from 9.326661 to 15.144617.
+
+Next: profiling found repeated serial endpoint lookup consumed about 0.10 s
+locally. Resolve each worker's endpoint once for all 72 hours, use a flat exact
+endpoint table and a short-window hash with full byte collision checks. Local
+merge time fell to about 0.02-0.03 s. Both full seeds still match. Board pending.

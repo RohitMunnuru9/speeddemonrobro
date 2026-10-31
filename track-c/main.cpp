@@ -14,7 +14,7 @@ struct Country {
   uint64_t count = 0, ids = 0, name_bytes = 0, note_bytes = 0, names = 0;
   int64_t sum = 0, lo = INT64_MAX, hi = INT64_MIN;
 };
-struct Name {
+struct alignas(64) Name {
   std::string_view text;
   std::array<std::atomic<uint64_t>, 4> countries{};
   std::atomic<uint64_t> hash{0};
@@ -27,7 +27,7 @@ struct NameTable {
   std::unordered_map<std::string_view, std::array<uint64_t, 4>> overflow;
   explicit NameTable(size_t size) : capacity(size), entries(std::make_unique<Name[]>(size)) {}
   bool mark(std::string_view text, size_t country) {
-    uint64_t hash = std::hash<std::string_view>{}(text) | 2;
+    uint64_t hash = std::hash<std::string_view>{}(text); if (hash < 2) hash += 2;
     size_t slot = hash & (capacity - 1);
     uint64_t bit = uint64_t{1} << (country % 64);
     for (size_t probe = 0; probe < 128; ++probe) {

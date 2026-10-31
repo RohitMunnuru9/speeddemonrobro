@@ -1,11 +1,13 @@
 # D: Traverse
 
-Edges are read from mapped input and counted in both directions, then scattered
-into forward and reverse CSR arrays. No route index is stored in the image.
+Edges are parsed in parallel from mapped input. Parallel stable radix ordering
+by source/destination enables sequential writes into forward/reverse CSR arrays.
+No route index is stored in the image.
 
 Queries use bidirectional Dijkstra with uint64 distances and monotone radix heaps.
-Four workers claim queries from an atomic counter. Each worker reuses distance
-and generation arrays. The smaller search frontier is expanded; termination
+Four workers claim queries from an atomic counter. Each worker packs exact
+distances and generation tags into one word per direction and node; the bit width
+is derived from the maximum simple-path sum and tag wrap clears state. The smaller search frontier is expanded; termination
 requires the two heap minima to reach the best complete path found. Results
 are written after joining workers, in original query order.
 

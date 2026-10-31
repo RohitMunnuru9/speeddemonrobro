@@ -18,3 +18,19 @@ locally than selecting a direction by distance. Both full seeds and 9,000
 independent Bellman-Ford query answers match. Local full-seed-1 time is roughly
 1.74-2.06 s, down from about 5.1 s on native WSL storage. Board measurement pending;
 compare against run-d1b7b2ec0eeb. Graph parsing and preprocessing remain timed.
+
+Board confirmation for commit 3cb973f: run-204ce24376f8, all gates passed,
+T=0.849999 s, M=266,108,928 bytes, S=265, K=8.968497, points=47.635982.
+This is 2.16x faster than the first board baseline, but reverse adjacency and
+worker buffers increased M. The new K is the improvement criterion.
+
+Next candidate builds CSR through parallel stable radix ordering instead of
+random scatter, and packs exact distances plus generation tags into one word.
+The distance bit width follows (n-1)*UINT32_MAX and generation wrap clears tags.
+Both full seeds and independent graph tests pass. Board measurement pending.
+
+Rejected local experiments: BFS vertex ordering reduced query time but added too
+much preprocessing (roughly 0.9-1.1 s build); degree-two contraction reduced full
+nodes from 1,740,512 to 1,342,958 but increased total time; pruning unqueried
+bidirectional leaves also failed to repay preprocessing. Unidirectional radix
+search used less memory but was slower end to end. These variants are not retained.

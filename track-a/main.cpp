@@ -1,18 +1,50 @@
 #include "io.hpp"
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <atomic>
 #include <filesystem>
 #include <iostream>
 #include <string_view>
 #include <unordered_map>
 constexpr size_t hours = 72;
+struct Slot { std::string_view text; uint64_t hash = 0; uint32_t id = 0; };
+uint64_t endpoint_hash(std::string_view s) {
+  uint64_t a = 0, b = 0, c = 0;
+  if (s.size() < 8) memcpy(&a, s.data(), s.size());
+  else {
+    memcpy(&a, s.data(), 8); memcpy(&b, s.data() + s.size() - 8, 8);
+    memcpy(&c, s.data() + (s.size() - 8) / 2, 8);
+  }
+  uint64_t h = a ^ std::rotl(b, 21) ^ std::rotl(c, 43) ^ s.size();
+  h ^= h >> 33; h *= 0xff51afd7ed558ccdULL; h ^= h >> 33;
+  return h ? h : 1;
+}
+struct Index {
+  std::vector<Slot> slots = std::vector<Slot>(4096);
+  size_t used = 0;
+  std::pair<uint32_t, bool> get(std::string_view name, uint32_t id, bool insert) {
+    uint64_t hash = endpoint_hash(name);
+    size_t slot = hash & (slots.size() - 1);
+    while (slots[slot].hash) {
+      if (slots[slot].hash == hash && slots[slot].text == name) return {slots[slot].id, false};
+      slot = (slot + 1) & (slots.size() - 1);
+    }
+    if (!insert) return {UINT32_MAX, false};
+    slots[slot] = {name, hash, id}; ++used;
+    if (used * 4 > slots.size() * 3) {
+      auto old = std::move(slots); slots.resize(old.size() * 2); used = 0;
+      for (auto e : old) if (e.hash) get(e.text, e.id, true);
+    }
+    return {id, true};
+  }
+};
 struct Endpoint {
   std::string_view name;
   std::array<uint32_t, hours> count{}, errors{}, cursor{};
 };
 struct Worker {
-  std::unordered_map<std::string_view, uint32_t> index;
+  Index index;
   std::vector<Endpoint> endpoints;
   std::vector<std::pair<uint32_t, uint32_t>> records;
 };
@@ -32,21 +64,21 @@ int main(int argc, char **argv) {
     // Parse once into compact (latency, local group) records. After assigning
     // global ranges, each worker scatters its records without hashing again.
     auto scan = [&](size_t thread) {
-      auto &w = local[thread]; w.index.reserve(2048);
+      auto &w = local[thread];
       w.records.reserve((boundary[thread + 1] - boundary[thread]) / 64);
       const char *p = boundary[thread];
       while (p < boundary[thread + 1]) {
         const int day = p[6] == '0' ? p[9] - '0' : p[9] - '0' + 1;
         const int hour = day * 24 + (p[11] - '0') * 10 + p[12] - '0' - 18;
         p += 28; while (*p++ != ' ') {}
-        const char *start = p; while (*p != ' ') ++p;
+        const char *start = p;
+        p = static_cast<const char *>(memchr(p, ' ', boundary[thread + 1] - p));
         std::string_view name(start, p - start); uint32_t id;
-          auto it = w.index.find(name);
-          if (it == w.index.end()) {
-            it = w.index.emplace(name, w.endpoints.size()).first;
+          auto [found, added] = w.index.get(name, w.endpoints.size(), true);
+          if (added) {
             w.endpoints.emplace_back(); w.endpoints.back().name = name;
           }
-          id = it->second;
+          id = found;
         auto &group = w.endpoints[id]; bool error = p[1] == '5';
         p += 5; uint32_t latency = number(p); ++p;
         ++group.count[hour]; group.errors[hour] += error;
@@ -58,13 +90,19 @@ int main(int argc, char **argv) {
     std::vector<std::string_view> names;
     for (auto &w : local) for (auto &e : w.endpoints) names.push_back(e.name);
     std::sort(names.begin(), names.end()); names.erase(std::unique(names.begin(), names.end()), names.end());
+    // Resolve endpoint IDs once, rather than hashing the same name for all 72 hours.
+    std::vector<std::array<Endpoint *, 6>> references(names.size());
+    for (size_t e = 0; e < names.size(); ++e) for (size_t t = 0; t < workers; ++t) {
+      auto id = local[t].index.get(names[e], 0, false).first;
+      if (id != UINT32_MAX) references[e][t] = &local[t].endpoints[id];
+    }
     const size_t groups = names.size() * hours;
     std::vector<uint32_t> offsets(groups + 1), errors(groups); uint32_t total = 0;
     for (size_t h = 0; h < hours; ++h) for (size_t e = 0; e < names.size(); ++e) {
       size_t g = h * names.size() + e; offsets[g] = total;
-      for (auto &w : local) {
-        auto it = w.index.find(names[e]); if (it == w.index.end()) continue;
-        auto &endpoint = w.endpoints[it->second]; endpoint.cursor[h] = total;
+      for (size_t t = 0; t < workers; ++t) {
+        if (!references[e][t]) continue;
+        auto &endpoint = *references[e][t]; endpoint.cursor[h] = total;
         total += endpoint.count[h]; errors[g] += endpoint.errors[h];
       }
     }

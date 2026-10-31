@@ -26,3 +26,9 @@ name table with atomic membership bits. Tested with full seeds 1 and 2 and a
 60,000-record duplicate-name stress case spanning all workers. Local full-seed-1
 runtime is about 0.32-0.40 s, versus roughly 2.35 s for the prior implementation
 on native WSL storage. Board measurement pending; compare against run-ca1317b2135c.
+
+Board confirmation for commit 3cb973f: run-ef82b1c61aac, all gates passed,
+T=0.113590 s, M=19,742,720 bytes, S=310, K=17.275824, points=61.871939.
+This is 8.56x faster than the first board baseline; K rose from 6.782354.
+Next candidate aligns shared entries to cache lines and preserves hash low-bit
+entropy. All existing correctness checks still pass; board measurement pending.

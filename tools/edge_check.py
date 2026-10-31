@@ -38,6 +38,12 @@ regions = b'region_id,country\n7,AAA\n'
 check("c", {"records.csv": records, "regions.csv": regions}, c.run_reference(records, regions))
 for threads in (1, 6, 12):
     check("d", {"graph.txt": d.EXAMPLE_GRAPH, "queries.txt": d.EXAMPLE_QUERIES}, d.EXAMPLE_OUTPUT, threads)
+chain = [(u, u+1, 1) for u in range(199)] + [(u+1, u, 2) for u in range(199)] + [(200, 201, 4294967295), (201, 200, 4294967295)]
+graph = f'202 {len(chain)}\n' + ''.join(f'{u} {v} {w}\n' for u,v,w in chain)
+query = '0 199\n199 0\n50 150\n150 50\n50 50\n200 201\n0 201\n'
+check("d", {"graph.txt": graph, "queries.txt": query}, '199\n398\n100\n200\n0\n4294967295\n-1\n', 6)
+heavy = [(u, u+1, 4294967295) for u in range(3)] + [(u+1,u,4294967295) for u in range(3)]
+check("d", {"graph.txt": '4 6\n'+''.join(f'{u} {v} {w}\n' for u,v,w in heavy), "queries.txt": '0 3\n3 0\n'}, '12884901885\n12884901885\n', 1)
 # Bellman-Ford is an independent oracle and does not depend on the event's
 # lattice structure or on either implementation's Dijkstra search.
 for seed in range(10):

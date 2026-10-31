@@ -27,6 +27,6 @@ The team field is `vayu`; the submission repository is
 https://github.com/RohitMunnuru9/speeddemonrobro.
 Make the repository public under the included MIT license by code freeze.
 
-No board run has been recorded yet. Populate each track's PERF.md with actual
-board run IDs as they become available. Never label local measurements as board
-results.
+All three tracks passed their first organizer board run on October 31, 2026.
+Each track's PERF.md records its exact run ID and measurements. Local measurements
+and practice-board results are distinct from final holdout scoring.

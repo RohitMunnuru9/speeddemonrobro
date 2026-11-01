@@ -149,3 +149,38 @@ Three alternating local runs gave median 0.9108 s against 1.0280 s for the prior
 best source (about 11.4% lower). Official measurement remains pending.
 Both full public seeds, the full independent seed 17, the sealed Docker run,
 and 9,000 independent arbitrary-graph answers pass for this candidate.
+
+Occupancy/filter receipt at ee47856: run-f1a242f9b1dc, all gates passed,
+T=0.300736 s, M=129,384,448 bytes, S=457, K=16.049853, points=60.273554.
+This slightly improves the prior best K=15.990120; time is similar and memory
+is lower. It does not establish a large speed gain on the scoring box.
+
+Next candidate packs three encoded four-byte arcs and the overflow range into
+one 16-byte node record. It preserves owner-routed construction, exact large-
+weight exceptions, unrestricted degree overflow and uint64 path distances.
+The first neighbor no longer requires a separate adjacency read, and high-degree
+overflow is prefetched before processing inline arcs. This differs from the
+earlier rejected 32-byte-node layout, which stored eight-byte arcs.
+
+Three alternating native runs gave median 0.9310 s versus 1.2135 s (about 23.3%
+lower) with the full public output unchanged. Official memory and time must
+both improve K before retaining this layout. Official measurement is pending.
+
+The next trial also halves ordinary query-state entries to eight bytes. Node
+bits come from the input; the remaining low-word bits hold a generation and a
+wide-distance tag. Ordinary distances occupy the high word. Larger distances
+use an exact uint64 side array, with its index in that word. Rehash copies
+current encoded entries; generation wrap clears stale records before reuse.
+Full-width radix heaps remain unchanged: a separate packed-heap experiment did
+not improve runtime and was rejected.
+
+Three alternating native runs gave 0.42427 s versus 0.44258 s for 16-byte labels
+(about 4.1% lower). Public full seeds 1/2, tiny/sample seeds 1/2 and 9,000 arbitrary
+graph answers pass. Another 2,054-answer chain test forces state rehash, distances
+above uint32 and a generation wrap on one worker. Construction still determines
+peak local RSS, so halving query labels does not imply halving total memory.
+Official time/memory/source tradeoff is pending.
+
+The combined inline-node/packed-label candidate also passes the actual sealed
+full-public Docker run and its PGO executable matches the independent full
+seed-17 reference (ad7c211024014a4c21a50faab598dd19e730cbc0b4e8013a7d3b3306132913ba).

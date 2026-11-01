@@ -17,14 +17,59 @@ struct Country {
   uint64_t count = 0, ids = 0, name_bytes = 0, note_bytes = 0, names = 0;
   int64_t sum = 0, lo = INT64_MAX, hi = INT64_MIN;
 };
-struct alignas(64) Name {
-  std::atomic<uint64_t> prefix{0};
-  std::array<uint64_t, 3> tail{};
-  std::array<std::atomic<uint64_t>, 4> countries{};
+struct alignas(32) CountryMask {
+  std::array<std::atomic<uint64_t>, 4> bits{};
 };
-// Short encoded payloads live directly with their masks. A length byte makes
-// the padded 32-byte key injective even when a payload contains zero bytes.
-// Longer keys and crowded probe chains retain an unbounded exact fallback.
+template <size_t Words> struct KeyTable {
+  struct alignas(16) Entry {
+    std::atomic<uint64_t> prefix{0};
+    std::array<uint64_t, Words - 1> tail{};
+  };
+  size_t capacity;
+  std::unique_ptr<Entry[]> entries;
+  std::unique_ptr<CountryMask[]> masks;
+  std::mutex mutex;
+  std::unordered_map<std::string_view, std::array<uint64_t, 4>> overflow;
+  explicit KeyTable(size_t n)
+      : capacity(n), entries(std::make_unique<Entry[]>(n)),
+        masks(std::make_unique<CountryMask[]>(n)) {}
+  bool fallback(std::string_view text, size_t country) {
+    std::lock_guard lock(mutex);
+    uint64_t bit = uint64_t{1} << (country % 64);
+    auto &word = overflow[text][country / 64];
+    bool fresh = !(word & bit);
+    word |= bit;
+    return fresh;
+  }
+  bool mark(const std::array<uint64_t, Words> &key, uint64_t hash,
+            std::string_view text, size_t country) {
+    if (key[0] < 2)
+      return fallback(text, country);
+    std::array<uint64_t, Words - 1> tail;
+    std::copy_n(key.begin() + 1, Words - 1, tail.begin());
+    size_t slot = hash & (capacity - 1);
+    for (size_t probe = 0; probe < 128; ++probe) {
+      auto &entry = entries[slot];
+      uint64_t present = entry.prefix.load(std::memory_order_acquire);
+      if (!present && entry.prefix.compare_exchange_strong(
+                          present, 1, std::memory_order_acq_rel)) {
+        entry.tail = tail;
+        entry.prefix.store(key[0], std::memory_order_release);
+        present = key[0];
+      }
+      while (present == 1)
+        present = entry.prefix.load(std::memory_order_acquire);
+      if (present == key[0] && entry.tail == tail) {
+        uint64_t bit = uint64_t{1} << (country % 64);
+        return !(masks[slot].bits[country / 64].fetch_or(
+                     bit, std::memory_order_relaxed) &
+                 bit);
+      }
+      slot = (slot + 1) & (capacity - 1);
+    }
+    return fallback(text, country);
+  }
+};
 struct NameTable {
   __attribute__((always_inline)) inline uint64_t
   prepare(std::string_view text) {
@@ -41,66 +86,64 @@ struct NameTable {
     hash ^= hash >> 33;
     hash *= 0xff51afd7ed558ccdULL;
     hash ^= hash >> 33;
-    __builtin_prefetch(&entries[hash & (capacity - 1)], 0, 1);
+    if (text.size() <= 16 &&
+        (text.size() < 16 || static_cast<unsigned char>(text[15]) >= 16)) {
+      __builtin_prefetch(&small.entries[hash & (small.capacity - 1)], 0, 1);
+      __builtin_prefetch(&small.masks[hash & (small.capacity - 1)], 0, 1);
+    } else {
+      __builtin_prefetch(&large.entries[hash & (large.capacity - 1)], 0, 1);
+      __builtin_prefetch(&large.masks[hash & (large.capacity - 1)], 0, 1);
+    }
     return hash;
   }
 
-  size_t capacity;
-  std::unique_ptr<Name[]> entries;
+  KeyTable<2> small;
+  KeyTable<4> large;
   std::array<std::atomic<uint64_t>, 4> empty{};
-  std::mutex mutex;
-  std::unordered_map<std::string_view, std::array<uint64_t, 4>> overflow;
-  explicit NameTable(size_t size)
-      : capacity(size), entries(std::make_unique<Name[]>(size)) {}
+  explicit NameTable(size_t n)
+      : small(n), large(std::max(size_t{128}, n / 4)) {}
   __attribute__((target("avx2"), always_inline)) inline bool
   mark(std::string_view text, size_t country, const char *end, uint64_t hash) {
-    uint64_t bit = uint64_t{1} << (country % 64);
-    if (text.empty())
+    // Short keys use byte 15 as a length tag. Full 16-byte names can share
+    // that table only when their last byte cannot equal such a tag.
+    if (text.empty()) {
+      uint64_t bit = uint64_t{1} << (country % 64);
       return !(empty[country / 64].fetch_or(bit, std::memory_order_relaxed) &
                bit);
-    auto fallback = [&] {
-      std::lock_guard lock(mutex);
-      auto &word = overflow[text][country / 64];
-      bool added = !(word & bit);
-      word |= bit;
-      return added;
-    };
+    }
     if (text.size() > 31)
-      return fallback();
+      return large.fallback(text, country);
+    if (text.size() <= 16 &&
+        (text.size() < 16 || static_cast<unsigned char>(text[15]) >= 16)) {
+      std::array<uint64_t, 2> key{};
+      if (end - text.data() >= 16) {
+        auto indices =
+            _mm_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+        auto keep = _mm_cmpgt_epi8(_mm_set1_epi8(text.size()), indices);
+        auto data =
+            _mm_loadu_si128(reinterpret_cast<const __m128i *>(text.data()));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(key.data()),
+                         _mm_and_si128(data, keep));
+      } else
+        memcpy(key.data(), text.data(), text.size());
+      if (text.size() < 16)
+        reinterpret_cast<unsigned char *>(key.data())[15] = text.size();
+      return small.mark(key, hash, text, country);
+    }
     std::array<uint64_t, 4> key{};
     if (end - text.data() >= 32) {
-      const auto indices = _mm256_setr_epi8(
-          0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-          20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
+      auto indices = _mm256_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+                                      13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+                                      23, 24, 25, 26, 27, 28, 29, 30, 31);
       auto keep = _mm256_cmpgt_epi8(_mm256_set1_epi8(text.size()), indices);
-      auto bytes =
+      auto data =
           _mm256_loadu_si256(reinterpret_cast<const __m256i *>(text.data()));
       _mm256_storeu_si256(reinterpret_cast<__m256i *>(key.data()),
-                          _mm256_and_si256(bytes, keep));
+                          _mm256_and_si256(data, keep));
     } else
       memcpy(key.data(), text.data(), text.size());
     reinterpret_cast<unsigned char *>(key.data())[31] = text.size();
-    if (key[0] < 2)
-      return fallback();
-    size_t slot = hash & (capacity - 1);
-    for (size_t probe = 0; probe < 128; ++probe) {
-      auto &entry = entries[slot];
-      uint64_t present = entry.prefix.load(std::memory_order_acquire);
-      if (!present && entry.prefix.compare_exchange_strong(
-                          present, 1, std::memory_order_acq_rel)) {
-        entry.tail = {key[1], key[2], key[3]};
-        entry.prefix.store(key[0], std::memory_order_release);
-        present = key[0];
-      }
-      while (present == 1)
-        present = entry.prefix.load(std::memory_order_acquire);
-      if (present == key[0] && entry.tail == std::array{key[1], key[2], key[3]})
-        return !(entry.countries[country / 64].fetch_or(
-                     bit, std::memory_order_relaxed) &
-                 bit);
-      slot = (slot + 1) & (capacity - 1);
-    }
-    return fallback();
+    return large.mark(key, hash, text, country);
   }
 };
 struct Field {

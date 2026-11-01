@@ -144,3 +144,26 @@ checks pass byte for byte. Official measurement is pending.
 
 The actual offline PGO Docker build also passes the sealed full-seed-1 run and
 the independent full seed-17 reference (61979ece5ecf40733491d28fd2022e6f04a85dd53c4629410dfeb48bc3d20591).
+
+Receipt for 9f7e74a: run-d405cd96af9e, all gates passed,
+T=0.052645 s, M=14,114,816 bytes, S=399, K=26.129731, points=70.856747.
+The official speed gain is 6.2%, considerably smaller than the unprofiled local
+comparison. Subsequent comparisons therefore use actual optimized PGO binaries.
+
+Next trial separates 16-byte short keys and 32-byte long keys from their masks.
+Reserved storage remains 8 MiB. Length tags and deterministic table routing
+preserve exact identity; long strings and probe overflow still use exact maps.
+Both the key and membership home addresses are prefetched in the existing
+16-record queue. Key publication retains the acquire/release claim protocol.
+
+A std-only Rust port was independently implemented and checked against the full
+public hash. Its original layout was similar in speed to current C++. A compact
+Rust version, including a PGO trial, was compared against compact C++. In the
+last warm paired run, medians were 0.07914 s (current C++), 0.06997 s (compact
+C++) and 0.07344 s (Rust PGO). Rust used about 0.7 MiB less local RSS, but did
+not establish a faster overall candidate. These are local observations; the
+compact C++ layout is selected for official comparison, not a language claim.
+
+The compact layout passes tiny/sample/full seeds 1 and 2, concurrent/hostile CSV
+edge cases, the sealed full-public Docker run and the actual PGO executable on
+independent full seed 17. Official scoring remains pending.

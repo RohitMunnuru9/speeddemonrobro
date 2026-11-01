@@ -15,16 +15,20 @@ membership fetch-or counts each name/country pair once across all workers.
 The CSV quote encoding is injective, so comparing encoded name payloads gives
 exact decoded equality without allocating strings. Quoted and unquoted empty
 payloads compare equal. Escapes are still counted to obtain decoded byte lengths.
-Encoded names up to 31 bytes live inline with their membership mask in a 64-byte
-slot. A length byte makes padded keys exact even with embedded zero bytes.
+Encoded names use separate exact key and membership arrays. Short keys occupy
+16 bytes; names requiring more room use 32-byte keys. Length tags make padded
+keys exact, including zero bytes. A full 16-byte key whose last byte could be
+confused with a short-key length tag uses the 32-byte table instead.
 The first word publishes the remaining key through acquire/release ordering.
 Long names, reserved first words and probe chains over 128 entries use an exact
 locked fallback without a name-length limit. Empty names share a separate mask.
 Country IDs fit in a byte (240 countries plus the unmatched group). Hash hits
 compare all padded key bytes. A bounded AVX2 quote scan handles short fields;
 longer fields continue through libc byte search.
-Short name keys use a bounded AVX2 load and a length mask instead of a variable
-copy. Input tails use the original bounded copy; all name bytes remain exact.
+Short name keys use bounded SIMD loads and length masks instead of variable
+copies. Input tails use bounded copies; all name bytes remain exact. The total
+reserved key/membership storage stays at 8 MiB for full inputs. Separating masks
+keeps country updates from invalidating the keys other workers are reading.
 Notes are scanned without allocation. Input is mapped read-only, sums use 64-bit
 integers, countries without records are omitted, and output keys sort bytewise.
 

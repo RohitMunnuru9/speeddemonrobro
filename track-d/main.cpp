@@ -60,66 +60,98 @@ struct RadixHeap {
   }
 };
 // The state grows with nodes visited by a query, rather than every graph node.
+
 struct SearchState {
-  struct Entry {
-    uint64_t distance = UINT64_MAX;
-    uint32_t node = 0, epoch = 0;
-  };
-  std::vector<Entry> entries = std::vector<Entry>(1024);
+  // Low word: node, generation and wide flag. High word: uint32 distance or
+  // an index into the exact uint64 side array. Wrapping generations clear all
+  // slots before any old side-array index can become visible again.
+  std::vector<uint64_t> entries = std::vector<uint64_t>(1024), wide;
   std::array<uint64_t, 1024> filter{};
-  uint64_t cross(uint32_t node) const {
-    if (!(filter[(node >> 6) & 1023] & (uint64_t{1} << (node & 63))))
-      return UINT64_MAX;
-    return get(node);
-  }
-  uint32_t epoch = 0;
   size_t used = 0;
+  unsigned bits;
+  uint32_t node_mask, epoch_limit, epoch = 0, epoch_mask, tag = 0;
+  explicit SearchState(uint32_t n = 2)
+      : bits(std::max(1u, unsigned(std::bit_width(n - 1)))) {
+    if (bits > 30)
+      throw std::runtime_error("node bound exceeds track specification");
+    node_mask = (uint32_t{1} << bits) - 1;
+    epoch_limit = (uint32_t{1} << (31 - bits)) - 1;
+    epoch_mask = 0x7fffffffU & ~node_mask;
+  }
   static size_t hash(uint32_t node) {
     uint64_t h = node * 0x9e3779b97f4a7c15ULL;
     return h ^ (h >> 32);
   }
   void clear() {
     used = 0;
+    wide.clear();
     filter.fill(0);
-    if (++epoch == 0) {
-      for (auto &entry : entries)
-        entry.epoch = 0;
+    if (++epoch > epoch_limit) {
+      std::fill(entries.begin(), entries.end(), 0);
       epoch = 1;
     }
+    tag = epoch << bits;
+  }
+  uint64_t distance(uint64_t entry) const {
+    return uint32_t(entry) & 0x80000000U ? wide[entry >> 32] : entry >> 32;
   }
   uint64_t get(uint32_t node) const {
     size_t slot = hash(node) & (entries.size() - 1);
-    while (entries[slot].epoch == epoch) {
-      if (entries[slot].node == node)
-        return entries[slot].distance;
+    while ((uint32_t(entries[slot]) & epoch_mask) == tag) {
+      uint64_t entry = entries[slot];
+      if ((uint32_t(entry) & node_mask) == node)
+        return distance(entry);
       slot = (slot + 1) & (entries.size() - 1);
     }
     return UINT64_MAX;
   }
-  bool relax(uint32_t node, uint64_t distance) {
+  uint64_t cross(uint32_t node) const {
+    if (!(filter[(node >> 6) & 1023] & (uint64_t{1} << (node & 63))))
+      return UINT64_MAX;
+    return get(node);
+  }
+  bool relax(uint32_t node, uint64_t value) {
     if ((used + 1) * 4 > entries.size() * 3) {
       auto old = std::move(entries);
-      entries.resize(old.size() * 2);
-      used = 0;
-      for (const auto &entry : old)
-        if (entry.epoch == epoch)
-          relax(entry.node, entry.distance);
+      entries.assign(old.size() * 2, 0);
+      for (auto entry : old)
+        if ((uint32_t(entry) & epoch_mask) == tag) {
+          size_t slot =
+              hash(uint32_t(entry) & node_mask) & (entries.size() - 1);
+          while ((uint32_t(entries[slot]) & epoch_mask) == tag)
+            slot = (slot + 1) & (entries.size() - 1);
+          entries[slot] = entry;
+        }
     }
     size_t slot = hash(node) & (entries.size() - 1);
-    while (entries[slot].epoch == epoch && entries[slot].node != node)
+    while ((uint32_t(entries[slot]) & epoch_mask) == tag &&
+           (uint32_t(entries[slot]) & node_mask) != node)
       slot = (slot + 1) & (entries.size() - 1);
-    auto &entry = entries[slot];
-    if (entry.epoch != epoch) {
-      filter[(node >> 6) & 1023] |= uint64_t{1} << (node & 63);
-      entry = {distance, node, epoch};
-      ++used;
-      return true;
-    }
-    if (distance >= entry.distance)
+    bool fresh = (uint32_t(entries[slot]) & epoch_mask) != tag;
+    if (!fresh && value >= distance(entries[slot]))
       return false;
-    entry.distance = distance;
+    uint64_t packed = value;
+    uint32_t flags = 0;
+    if (value > UINT32_MAX) {
+      packed = wide.size();
+      if (packed > UINT32_MAX)
+        throw std::runtime_error("wide label index overflow");
+      wide.push_back(value);
+      flags = 0x80000000U;
+    }
+    entries[slot] = (packed << 32) | tag | flags | node;
+    if (fresh) {
+      ++used;
+      filter[(node >> 6) & 1023] |= uint64_t{1} << (node & 63);
+    }
     return true;
   }
+};
+struct alignas(16) Node {
+  // Top two range bits count inline arcs; low bits locate overflow. The next
+  // node supplies the overflow end, including for nodes with no overflow.
+  uint32_t arcs[3];
+  uint32_t range;
 };
 struct Edge {
   uint32_t v, w;
@@ -208,63 +240,57 @@ int main(int argc, char **argv) {
                                             (v & mask));
       }
     });
-    std::array<std::vector<uint32_t>, 2> coarse{
-        std::vector<uint32_t>(blocks + 1), std::vector<uint32_t>(blocks + 1)};
-    for (size_t side = 0; side < 2; ++side) {
-      uint32_t cursor = 0;
-      for (size_t b = 0; b < blocks; ++b) {
-        coarse[side][b] = cursor;
-        for (size_t t = 0; t < builders; ++t)
-          cursor += stores[t][side].blocks[b].count;
-      }
-      coarse[side].back() = cursor;
-      if (cursor != m)
-        throw std::runtime_error("edge count mismatch");
-    }
-    std::array<std::unique_ptr<uint32_t[]>, 2> offsets;
     unsigned weight_bits = 31 - std::min(31u, unsigned(std::bit_width(n - 1)));
     uint32_t weight_mask = (uint64_t{1} << weight_bits) - 1;
     uint32_t neighbor_mask = (uint64_t{1} << (31 - weight_bits)) - 1;
+    constexpr uint32_t offset_mask = (uint32_t{1} << 30) - 1;
+    std::array<std::unique_ptr<Node[]>, 2> nodes;
     std::array<std::unique_ptr<uint32_t[]>, 2> edges;
     std::array<std::unique_ptr<uint64_t[]>, 2> wide;
     for (size_t side = 0; side < 2; ++side) {
-      offsets[side] = std::make_unique_for_overwrite<uint32_t[]>(size_t(n) + 1);
-      edges[side] = std::make_unique_for_overwrite<uint32_t[]>(m);
-      std::vector<uint32_t> wide_counts(blocks + 1);
+      nodes[side] = std::make_unique_for_overwrite<Node[]>(size_t(n) + 1);
+      std::vector<uint32_t> wide_counts(blocks + 1),
+          overflow_counts(blocks + 1);
       parallel(builders, [&](size_t t) {
-        std::array<uint32_t, 1024> local;
+        std::array<uint32_t, 1024> degree;
         for (size_t b = t; b < blocks; b += builders) {
-          local.fill(0);
+          degree.fill(0);
           uint32_t exceptions = 0;
           for (size_t worker = 0; worker < builders; ++worker)
             for (auto row : stores[worker][side].range(b)) {
-              ++local[row & mask];
+              ++degree[row & mask];
               exceptions += uint32_t(row >> (32 + shift)) > neighbor_mask ||
                             uint32_t(row >> shift) > weight_mask;
             }
           wide_counts[b] = exceptions;
-          uint32_t cursor = coarse[side][b];
+          uint32_t cursor = 0;
           for (size_t j = 0; j <= mask && (b << shift) + j < n; ++j) {
-            offsets[side][(b << shift) + j] = cursor;
-            cursor += local[j];
+            nodes[side][(b << shift) + j].range =
+                (std::min(degree[j], 3u) << 30) | cursor;
+            cursor += degree[j] > 3 ? degree[j] - 3 : 0;
           }
+          overflow_counts[b] = cursor;
         }
       });
-      uint32_t total = 0;
+      uint32_t overflow_total = 0, wide_total = 0;
       for (size_t b = 0; b < blocks; ++b) {
-        uint32_t count = wide_counts[b];
-        wide_counts[b] = total;
-        total += count;
+        uint32_t count = overflow_counts[b];
+        overflow_counts[b] = overflow_total;
+        overflow_total += count;
+        count = wide_counts[b];
+        wide_counts[b] = wide_total;
+        wide_total += count;
       }
-      wide_counts.back() = total;
-      if (total >= uint32_t{1} << 31)
-        throw std::runtime_error("wide edge index overflow");
-      wide[side] = std::make_unique_for_overwrite<uint64_t[]>(total);
+      if (overflow_total > offset_mask || wide_total >= uint32_t{1} << 31)
+        throw std::runtime_error("graph index overflow");
+      edges[side] = std::make_unique_for_overwrite<uint32_t[]>(overflow_total);
+      wide[side] = std::make_unique_for_overwrite<uint64_t[]>(wide_total);
       parallel(builders, [&](size_t t) {
         std::array<uint32_t, 1024> cursor;
         for (size_t b = t; b < blocks; b += builders) {
+          cursor.fill(0);
           for (size_t j = 0; j <= mask && (b << shift) + j < n; ++j)
-            cursor[j] = offsets[side][(b << shift) + j];
+            nodes[side][(b << shift) + j].range += overflow_counts[b];
           uint32_t exception = wide_counts[b];
           for (size_t worker = 0; worker < builders; ++worker)
             for (auto row : stores[worker][side].range(b)) {
@@ -276,11 +302,16 @@ int main(int argc, char **argv) {
                 wide[side][exception] = (uint64_t(neighbor) << 32) | weight;
                 code = (uint32_t{1} << 31) | exception++;
               }
-              edges[side][cursor[row & mask]++] = code;
+              uint32_t local = row & mask, rank = cursor[local]++;
+              auto &node = nodes[side][(b << shift) + local];
+              if (rank < 3)
+                node.arcs[rank] = code;
+              else
+                edges[side][(node.range & offset_mask) + rank - 3] = code;
             }
         }
       });
-      offsets[side][n] = m;
+      nodes[side][n].range = overflow_total;
       for (auto &worker : stores)
         worker[side] = BlockStore{};
     }
@@ -306,7 +337,7 @@ int main(int argc, char **argv) {
     if (const char *env = std::getenv("SD_THREADS"))
       workers = std::clamp(std::atoi(env), 1, 12);
     parallel(workers, [&](size_t) {
-      std::array<SearchState, 2> state;
+      std::array<SearchState, 2> state{SearchState(n), SearchState(n)};
       std::array<RadixHeap, 2> heap;
       for (;;) {
         size_t i = next.fetch_add(1);
@@ -317,8 +348,7 @@ int main(int argc, char **argv) {
           answers[i] = 0;
           continue;
         }
-        if (offsets[0][s] == offsets[0][s + 1] ||
-            offsets[1][t] == offsets[1][t + 1])
+        if (!(nodes[0][s].range >> 30) || !(nodes[1][t].range >> 30))
           continue;
         state[0].clear();
         state[1].clear();
@@ -342,15 +372,24 @@ int main(int argc, char **argv) {
             continue;
           if (auto opposite = state[other].cross(u); opposite != UINT64_MAX)
             best = std::min(best, d + opposite);
-          for (uint32_t e = offsets[side][u]; e < offsets[side][u + 1]; ++e) {
-            auto [v, w] = decode(side, edges[side][e]);
+          auto visit = [&](uint32_t code) {
+            auto [v, w] = decode(side, code);
             uint64_t nd = d + w;
             if (state[side].relax(v, nd)) {
               heap[side].push(nd, v);
               if (auto opposite = state[other].cross(v); opposite != UINT64_MAX)
                 best = std::min(best, nd + opposite);
             }
-          }
+          };
+          const auto &node = nodes[side][u];
+          uint32_t first = node.range & offset_mask,
+                   last = nodes[side][u + 1].range & offset_mask;
+          if (first < last)
+            __builtin_prefetch(edges[side].get() + first, 0, 1);
+          for (unsigned k = 0; k < (node.range >> 30); ++k)
+            visit(node.arcs[k]);
+          for (uint32_t e = first; e < last; ++e)
+            visit(edges[side][e]);
         }
         if (best != UINT64_MAX)
           answers[i] = best;

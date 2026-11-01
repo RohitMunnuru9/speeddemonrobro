@@ -273,3 +273,32 @@ Memory fell 17.4% against the preceding best, but the combined score did not
 beat 64.907190. Revert compact temporary storage and compare neighbor-label
 prefetching alone, which was faster in the paired PGO comparison and adds
 only the prefetch stage. The measured compact version remains in git history.
+
+The prefetch-only e71d607 trial passed all gates in run-34fb486d6c0e:
+T=0.191793 s, M=127,545,344 bytes, S=532, K=19.701150, points=64.724579.
+This did not exceed the preceding best K=19.867526.
+
+The next trial groups four label probes in a bounded AVX2 load. Three mirrored
+slots after each power-of-two table make wraparound loads valid. Low-slot
+writes update their mirrors; rehash copies only real entries and refreshes
+mirrors. Full node/generation comparisons, exact uint64 wide labels and the
+membership filter remain unchanged. No deletion occurs within a query, so a
+matching key cannot lie past an earlier empty slot in its linear probe sequence.
+
+Remove the opposite-label check at pop: every successful label improvement
+already checks the opposite direction, so the latest update of either label
+has evaluated that pair. Source==target is handled before queue setup. The
+stopping rule and real directed-path candidates are unchanged.
+
+Eight warm adjacent actual PGO pairs gave vector/baseline median wall ratio
+0.94724 and CPU ratio 0.93640. The first pair is excluded because the final
+candidate build was still finishing. A narrow uint32 queue with an exact
+uint64 restart fallback gave 0.97843; combining it with vector labels gave
+0.95586. Neither narrower variant is selected in this trial.
+
+The vector table passes 783,636 independent reference-map updates exercising
+growth, wraparound probes, wide values and generation reuse. Disabling mirrored
+writes makes that oracle fail. Public seeds 1/2 at all three scales, the graph
+edge suite, wide-distance/generation stress and the bucket-migration star pass.
+The sealed full-public image passes; its PGO executable matches the existing
+independent full seed-17 reference. Official performance is pending.

@@ -128,3 +128,28 @@ latency histograms narrowed exact percentile selections without approximating
 the answer; bucket widths 16/64/256 gave essentially tied end-to-end results.
 Extra code and allocations would cost without an established runtime benefit.
 Keep the current submitted A implementation. No new A score gain is claimed.
+
+Next experiment tests input teardown on the twelve-CPU scorer. Existing parse
+workers drop their borrowed-key state, rendezvous after every input reader has
+finished, then unmap disjoint page-aligned ranges. The main mapping owner is
+disarmed only after the scoped workers join, including on an output error.
+Failed rendezvous sends break the work loop but still reach cleanup; an early
+ENOSPC regression checks that all twelve workers terminate. No new threads are
+started for teardown, and the parser and percentile calculations are unchanged.
+
+The hypothesis was informed by Cache Me's public input-unmapping investigation:
+https://github.com/manusingh090/speed-demon-2026-entry/blob/speed-demon/track-a/PERF.md
+This implementation waits for all hour-owned readers, rather than releasing
+input as byte-owned parsing completes. Its effect must be measured separately.
+
+Eleven alternating full-public comparisons on the four-CPU development VM gave
+candidate/baseline median wall ratio 1.04613, not a local improvement. A single-
+worker cleanup control gave 1.02585. The official trial tests whether the extra
+parallelism on twelve CPUs repays the barrier and source cost. Select only on
+the full official K; the public write-up's gains are not our measurements.
+
+Public tiny/sample/full seeds 1/2 and twelve parser/ordering edge checks pass,
+including 18,963 shuffled stress records. The actual offline runtime passes
+sealed full seeds 1 and 17; seed-17 output matches the saved independent
+reference hash 8425e98480a26cf8de7a49507752da24fe522fe47814107b8d1870681365989a.
+Official performance is pending.

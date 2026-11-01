@@ -5,7 +5,7 @@ use std::fs::{self, File};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::io::{self, BufWriter, Write};
 use std::os::fd::AsRawFd;
-use std::sync::mpsc::sync_channel;
+use std::sync::{mpsc::sync_channel, Barrier};
 use std::{env, ptr, slice, thread};
 
 extern "C" {
@@ -314,7 +314,7 @@ fn main() -> io::Result<()> {
     let args: Vec<_> = env::args().collect();
     let data = args.get(1).map_or("/data", String::as_str);
     let out = args.get(2).map_or("/out", String::as_str);
-    let mapping = Mapping::open(&format!("{data}/requests.log"))?;
+    let mut mapping = Mapping::open(&format!("{data}/requests.log"))?;
     let bytes = mapping.bytes();
     let workers = env::var("SD_THREADS")
         .ok()
@@ -342,18 +342,34 @@ fn main() -> io::Result<()> {
     });
     fs::create_dir_all(out)?;
     let mut file = BufWriter::new(File::create(format!("{out}/summary.txt"))?);
-    thread::scope(|scope| -> io::Result<()> {
+    let barrier = Barrier::new(workers);
+    let base = bytes.as_ptr() as usize;
+    let length = bytes.len();
+    let pages = length.div_ceil(4096);
+    let result = thread::scope(|scope| -> io::Result<()> {
         let mut receivers = Vec::new();
         for t in 0..workers {
             let (sender, receiver) = sync_channel(0);
             receivers.push(receiver);
             let ranges = &ranges;
+            let barrier = &barrier;
             scope.spawn(move || {
                 let mut state = Worker::default();
                 for hour in (t..72).step_by(workers) {
                     let output = solve_hour(bytes, &ranges[hour], hour, &mut state);
                     if sender.send(output).is_err() {
-                        return;
+                        break;
+                    }
+                }
+                drop(state);
+                // Borrowed endpoint keys are gone before any input page is
+                // released. All readers rendezvous, then free disjoint pages.
+                barrier.wait();
+                let first = pages * t / workers * 4096;
+                let end = (pages * (t + 1) / workers * 4096).min(length);
+                if first < end {
+                    unsafe {
+                        munmap((base + first) as *mut c_void, end - first);
                     }
                 }
             });
@@ -363,6 +379,9 @@ fn main() -> io::Result<()> {
             file.write_all(&output)?;
         }
         Ok(())
-    })?;
+    });
+    // The workers released the mapping even when the writer returned an error.
+    mapping.length = 0;
+    result?;
     file.flush()
 }

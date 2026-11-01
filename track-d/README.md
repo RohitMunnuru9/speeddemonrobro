@@ -43,6 +43,12 @@ A second prefetch stage reads the current direction's label slots for inline
 neighbors after the batch's graph records arrive. It changes memory timing,
 not the set or order of relaxations.
 
+The label table probes four entries at a time using bounded AVX2 loads. Three
+mirrored entries cover wraparound; updates and rehashing maintain those mirrors.
+Full key/generation comparisons preserve exact matches and wide distances.
+Meeting costs are checked whenever either label improves, avoiding a redundant
+check when a vertex is later popped.
+
 A query whose target has no incoming edges, or whose source has no outgoing
 edges, is unreachable unless source equals target. These graph facts are computed
 from the current input. Parallel edges, zero weights and duplicate queries need

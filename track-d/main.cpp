@@ -5,6 +5,7 @@
 #include <bit>
 #include <cstdlib>
 #include <filesystem>
+#include <immintrin.h>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -67,10 +68,13 @@ struct RadixHeap {
 // The state grows with nodes visited by a query, rather than every graph node.
 
 struct SearchState {
+  // Three mirrored slots make four-lane probes at the table end contiguous.
+  // Only real slots participate in rehashing; mirrors follow every low-slot write.
   // Low word: node, generation and wide flag. High word: uint32 distance or
   // an index into the exact uint64 side array. Wrapping generations clear all
   // slots before any old side-array index can become visible again.
-  std::vector<uint64_t> entries = std::vector<uint64_t>(1024), wide;
+  std::vector<uint64_t> entries = std::vector<uint64_t>(1027), wide;
+  size_t table_size = 1024;
   std::array<uint64_t, 1024> filter{};
   size_t used = 0;
   unsigned bits;
@@ -100,15 +104,32 @@ struct SearchState {
   uint64_t distance(uint64_t entry) const {
     return uint32_t(entry) & 0x80000000U ? wide[entry >> 32] : entry >> 32;
   }
-  uint64_t get(uint32_t node) const {
-    size_t slot = hash(node) & (entries.size() - 1);
-    while ((uint32_t(entries[slot]) & epoch_mask) == tag) {
-      uint64_t entry = entries[slot];
-      if ((uint32_t(entry) & node_mask) == node)
-        return distance(entry);
-      slot = (slot + 1) & (entries.size() - 1);
+  size_t locate(uint32_t node) const {
+    size_t slot = hash(node) & (table_size - 1);
+
+    auto keymask = _mm256_set1_epi64x(0x7fffffffU),
+         key = _mm256_set1_epi64x(uint64_t(tag) | node);
+    auto generationmask = _mm256_set1_epi64x(epoch_mask),
+         generation = _mm256_set1_epi64x(tag);
+    for (;;) {
+      auto values = _mm256_loadu_si256(
+          reinterpret_cast<const __m256i *>(entries.data() + slot));
+      unsigned match = _mm256_movemask_pd(_mm256_castsi256_pd(
+          _mm256_cmpeq_epi64(_mm256_and_si256(values, keymask), key)));
+      // Without deletion a matching key cannot lie past an earlier empty slot.
+      if (match)
+        return (slot + std::countr_zero(match)) & (table_size - 1);
+      unsigned occupied =
+          _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(
+              _mm256_and_si256(values, generationmask), generation)));
+      if (occupied != 15)
+        return (slot + std::countr_zero(occupied ^ 15)) & (table_size - 1);
+      slot = (slot + 4) & (table_size - 1);
     }
-    return UINT64_MAX;
+  }
+  uint64_t get(uint32_t node) const {
+    uint64_t entry = entries[locate(node)];
+    return (uint32_t(entry) & epoch_mask) == tag ? distance(entry) : UINT64_MAX;
   }
   uint64_t cross(uint32_t node) const {
     if (!(filter[(node >> 6) & 1023] & (uint64_t{1} << (node & 63))))
@@ -116,22 +137,20 @@ struct SearchState {
     return get(node);
   }
   bool relax(uint32_t node, uint64_t value) {
-    if ((used + 1) * 4 > entries.size() * 3) {
+    if ((used + 1) * 4 > table_size * 3) {
       auto old = std::move(entries);
-      entries.assign(old.size() * 2, 0);
-      for (auto entry : old)
+      table_size *= 2;
+      entries.assign(table_size + 3, 0);
+      for (auto entry : std::span(old.data(), old.size() - 3))
         if ((uint32_t(entry) & epoch_mask) == tag) {
-          size_t slot =
-              hash(uint32_t(entry) & node_mask) & (entries.size() - 1);
+          size_t slot = hash(uint32_t(entry) & node_mask) & (table_size - 1);
           while ((uint32_t(entries[slot]) & epoch_mask) == tag)
-            slot = (slot + 1) & (entries.size() - 1);
+            slot = (slot + 1) & (table_size - 1);
           entries[slot] = entry;
         }
+      std::copy_n(entries.data(), 3, entries.data() + table_size);
     }
-    size_t slot = hash(node) & (entries.size() - 1);
-    while ((uint32_t(entries[slot]) & epoch_mask) == tag &&
-           (uint32_t(entries[slot]) & node_mask) != node)
-      slot = (slot + 1) & (entries.size() - 1);
+    size_t slot = locate(node);
     bool fresh = (uint32_t(entries[slot]) & epoch_mask) != tag;
     if (!fresh && value >= distance(entries[slot]))
       return false;
@@ -145,6 +164,8 @@ struct SearchState {
       flags = 0x80000000U;
     }
     entries[slot] = (packed << 32) | tag | flags | node;
+    if (slot < 3)
+      entries[table_size + slot] = entries[slot];
     if (fresh) {
       ++used;
       filter[(node >> 6) & 1023] |= uint64_t{1} << (node & 63);
@@ -349,7 +370,7 @@ int main(int argc, char **argv) {
           __builtin_prefetch(nodes[side].get() + u, 0, 3);
           __builtin_prefetch(
               state[side].entries.data() +
-                  (SearchState::hash(u) & (state[side].entries.size() - 1)),
+                  (SearchState::hash(u) & (state[side].table_size - 1)),
               0, 3);
         });
       };
@@ -394,7 +415,7 @@ int main(int argc, char **argv) {
             __builtin_prefetch(nodes[side].get() + u, 0, 3);
             __builtin_prefetch(
                 state[side].entries.data() +
-                    (SearchState::hash(u) & (state[side].entries.size() - 1)),
+                    (SearchState::hash(u) & (state[side].table_size - 1)),
                 0, 3);
           } while (count < batch.size() && !heap[side].buckets[0].empty());
           for (size_t j = 0; j < count; ++j) {
@@ -404,7 +425,7 @@ int main(int argc, char **argv) {
               uint32_t v = decode(side, code).v;
               size_t hash = SearchState::hash(v);
               __builtin_prefetch(state[side].entries.data() +
-                                     (hash & (state[side].entries.size() - 1)),
+                                     (hash & (state[side].table_size - 1)),
                                  1, 3);
             };
             for (unsigned k = 0; k < (node.range >> 30); ++k)
@@ -415,8 +436,6 @@ int main(int argc, char **argv) {
 
             if (d != state[side].get(u))
               continue;
-            if (auto opposite = state[other].cross(u); opposite != UINT64_MAX)
-              best = std::min(best, d + opposite);
             auto visit = [&](uint32_t code) {
               auto [v, w] = decode(side, code);
               uint64_t nd = d + w;

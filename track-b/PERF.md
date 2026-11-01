@@ -101,3 +101,9 @@ The selected source passes tiny/sample seeds 1/2, every tokenizer boundary and
 posting-overflow edge case at 1/6/12 workers, the sealed full-public Docker run,
 and the actual PGO executable against independent full seed 17
 (87c77cf18a8841688a551061db6253f7d542609e8f82c69cfe756eb7f8a463be).
+
+Receipt for adb4712: run-09e52f290c70, all gates passed,
+T=0.422194 s, M=136,933,376 bytes, S=849, K=14.401287, points=57.920065.
+Previous best: T=0.424208 s, K=14.348427, points=57.840215. Runtime is nearly
+unchanged; smaller source offsets slightly higher memory. This is a small K
+gain and does not establish a substantial speedup.

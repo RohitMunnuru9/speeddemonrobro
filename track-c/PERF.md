@@ -167,3 +167,8 @@ compact C++ layout is selected for official comparison, not a language claim.
 The compact layout passes tiny/sample/full seeds 1 and 2, concurrent/hostile CSV
 edge cases, the sealed full-public Docker run and the actual PGO executable on
 independent full seed 17. Official scoring remains pending.
+
+Receipt for adb4712: run-a5bd15d5178c, all gates passed,
+T=0.047419 s, M=13,881,344 bytes, S=443, K=27.193895, points=71.723571.
+Against 9f7e74a, wall time fell 9.9% and K rose 4.1% despite the larger source.
+The compact exact C++ layout is retained.

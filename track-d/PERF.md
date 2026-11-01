@@ -184,3 +184,8 @@ Official time/memory/source tradeoff is pending.
 The combined inline-node/packed-label candidate also passes the actual sealed
 full-public Docker run and its PGO executable matches the independent full
 seed-17 reference (ad7c211024014a4c21a50faab598dd19e730cbc0b4e8013a7d3b3306132913ba).
+
+Receipt for adb4712: run-16272588120f, all gates passed,
+T=0.232462 s, M=124,387,328 bytes, S=490, K=18.208199, points=63.013350.
+Against the prior best at ee47856, wall time fell 22.7%, memory fell 3.9% and
+K rose 13.4%. The combined inline-node/packed-label layout is retained.

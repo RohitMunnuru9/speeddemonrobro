@@ -266,3 +266,10 @@ ordinary, escaped and UINT32_MAX-weight rows.
 The actual sealed image passes full public seed 1. Its optimized PGO executable
 also matches the independent full seed-17 reference
 (ad7c211024014a4c21a50faab598dd19e730cbc0b4e8013a7d3b3306132913ba).
+
+Receipt for the combined trial at 7888cf2: run-68ef5bde6114, all gates passed,
+T=0.200244 s, M=107,827,200 bytes, S=567, K=19.749893, points=64.778237.
+Memory fell 17.4% against the preceding best, but the combined score did not
+beat 64.907190. Revert compact temporary storage and compare neighbor-label
+prefetching alone, which was faster in the paired PGO comparison and adds
+only the prefetch stage. The measured compact version remains in git history.

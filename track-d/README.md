@@ -2,8 +2,7 @@
 
 Edges are parsed once in parallel from mapped input into coarse vertex buckets.
 Bucket ownership supplies high vertex bits; local vertex, full uint32 weight and
-opposite vertex form a lossless temporary row. Ordinary rows take six bytes;
-weights above 32767 use a tagged index into exact uint64 rows. Estimated bucket
+opposite vertex fit losslessly in temporary uint64 records. Estimated bucket
 capacity has an exact growing overflow, so skewed inputs retain every edge.
 Each bucket owner counts degrees and fills forward/reverse adjacency without atomics
 or global edge sorting. Temporary directions are released as construction finishes.

@@ -8,7 +8,6 @@
 #include <iostream>
 #include <limits>
 #include <memory>
-#include <ranges>
 #include <span>
 #include <utility>
 
@@ -163,62 +162,26 @@ struct Edge {
   uint32_t v, w;
 };
 struct BlockStore {
-  // Six-byte ordinary rows hold the local ID, opposite ID and a 15-bit weight.
-  // Bit 47 escapes to a lossless original uint64 row for larger weights.
   struct Block {
     uint32_t offset = 0, count = 0, capacity = 0;
   };
-  std::unique_ptr<unsigned char[]> values;
+  std::unique_ptr<uint64_t[]> values;
   std::vector<Block> blocks;
   std::vector<std::vector<uint64_t>> overflow;
-  std::vector<uint64_t> wide;
-  unsigned shift = 0;
-  void initialize(size_t count, uint32_t capacity, unsigned bits) {
-    shift = bits;
-    values =
-        std::make_unique_for_overwrite<unsigned char[]>(count * capacity * 6);
+  void initialize(size_t count, uint32_t capacity) {
+    values = std::make_unique_for_overwrite<uint64_t[]>(count * capacity);
     blocks.resize(count);
     for (size_t i = 0; i < count; ++i)
       blocks[i] = {uint32_t(i * capacity), 0, capacity};
   }
-  uint64_t load(size_t index) const {
-    uint32_t lo;
-    uint16_t hi;
-    memcpy(&lo, values.get() + index * 6, 4);
-    memcpy(&hi, values.get() + index * 6 + 4, 2);
-    uint64_t code = lo | (uint64_t(hi) << 32);
-    if (code >> 47)
-      return wide[code & ((uint64_t{1} << 47) - 1)];
-    uint32_t neighbor = code >> (15 + shift), weight = (code >> shift) & 32767,
-             local = code & ((uint32_t{1} << shift) - 1);
-    return (uint64_t(neighbor) << (32 + shift)) | (uint64_t(weight) << shift) |
-           local;
-  }
   void append(size_t index, uint64_t value) {
     auto &block = blocks[index];
-    if (block.capacity && block.count < block.capacity) {
-      uint32_t weight = value >> shift;
-      uint64_t code;
-      if (weight <= 32767)
-        code = ((value >> (32 + shift)) << (15 + shift)) |
-               (uint64_t(weight) << shift) |
-               (value & ((uint32_t{1} << shift) - 1));
-      else {
-        code = (uint64_t{1} << 47) | wide.size();
-        wide.push_back(value);
-      }
-      size_t at = size_t(block.offset + block.count) * 6;
-      uint32_t lo = code;
-      uint16_t hi = code >> 32;
-      memcpy(values.get() + at, &lo, 4);
-      memcpy(values.get() + at + 4, &hi, 2);
-    } else {
+    if (block.capacity && block.count < block.capacity)
+      values[block.offset + block.count] = value;
+    else {
       if (block.capacity) {
-        std::vector<uint64_t> rows;
-        rows.reserve(size_t(block.count) * 2 + 1);
-        for (uint32_t i = 0; i < block.count; ++i)
-          rows.push_back(load(block.offset + i));
-        overflow.push_back(std::move(rows));
+        auto first = values.get() + block.offset;
+        overflow.emplace_back(first, first + block.count);
         block.offset = overflow.size() - 1;
         block.capacity = 0;
       }
@@ -226,13 +189,13 @@ struct BlockStore {
     }
     ++block.count;
   }
-  auto range(size_t index) const {
+  std::span<const uint64_t> range(size_t index) const {
     const auto &block = blocks[index];
-    return std::views::iota(uint32_t{0}, block.count) |
-           std::views::transform([this, &block](uint32_t i) {
-             return block.capacity ? load(block.offset + i)
-                                   : overflow[block.offset][i];
-           });
+    if (!block.count)
+      return {};
+    return block.capacity ? std::span<const uint64_t>(
+                                values.get() + block.offset, block.count)
+                          : std::span<const uint64_t>(overflow[block.offset]);
   }
 };
 int main(int argc, char **argv) {
@@ -264,8 +227,8 @@ int main(int argc, char **argv) {
       size_t expected = uint64_t(m) * (boundary[t + 1] - boundary[t]) /
                         std::max<ptrdiff_t>(1, input.data + input.size - p);
       uint32_t capacity = expected / blocks * 21 / 20 + 32;
-      stores[t][0].initialize(blocks, capacity, shift);
-      stores[t][1].initialize(blocks, capacity, shift);
+      stores[t][0].initialize(blocks, capacity);
+      stores[t][1].initialize(blocks, capacity);
       const char *q = boundary[t];
       while (q < boundary[t + 1]) {
         uint32_t u = number(q);
@@ -434,8 +397,6 @@ int main(int argc, char **argv) {
                     (SearchState::hash(u) & (state[side].entries.size() - 1)),
                 0, 3);
           } while (count < batch.size() && !heap[side].buckets[0].empty());
-          // The graph records have arrived; overlap neighbor-label reads with
-          // expansion of the preceding entries in this same-key batch.
           for (size_t j = 0; j < count; ++j) {
             uint32_t u = batch[j].second;
             const auto &node = nodes[side][u];

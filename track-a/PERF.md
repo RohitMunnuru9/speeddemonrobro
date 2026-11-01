@@ -109,3 +109,22 @@ without changing the data algorithm. Compare its official K with 32.423128.
 Native-target receipt for 3292dcb: run-341750182151, all gates passed,
 T=0.045457 s, M=22,077,440 bytes, S=371, K=31.893941, points=75.185409.
 No gain was established; restore x86-64-v3, whose previous K was higher.
+
+November 1 A investigation, while D remained the first priority: profile the
+current index/group/percentile phases, then compare complete public-full output
+and end-to-end time for each trial. The development Docker VM has four CPUs;
+these are local diagnostics, not official twelve-CPU score predictions.
+
+Direct one-pass (hour, endpoint) grouping was about 27% slower and used more
+memory. Streaming 32/64/128-byte newline indexing did not establish a reliable
+gain. Cached timestamp prefixes were about 11% slower. Buffered output channels
+with capacities 1/2/6 did not show a repeatable gain. Removing individual bounds
+checks showed an apparent short-run gain that reversed in a longer comparison;
+neither the unchecked variant nor its safe prefix-slice alternative is selected.
+
+Dense endpoint groups with exact prehashed keys and direct caches of 64/256/1024
+entries matched the public-full output but were about 15–19% slower. Coarse
+latency histograms narrowed exact percentile selections without approximating
+the answer; bucket widths 16/64/256 gave essentially tied end-to-end results.
+Extra code and allocations would cost without an established runtime benefit.
+Keep the current submitted A implementation. No new A score gain is claimed.

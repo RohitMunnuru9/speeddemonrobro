@@ -91,25 +91,25 @@ struct PostingView {
                               doc - (*store->starts)[worker]);
   }
 };
+struct Key {
+  uint64_t a = 0, b = 0, c = 0, d = 0;
+  bool operator==(const Key &) const = default;
+};
 bool word_byte(unsigned char c) {
   return (c >= '0' && c <= '9') || ((c | 32) >= 'a' && (c | 32) <= 'z');
 }
+
 template <class F>
 __attribute__((target("avx2"))) void tokenize(std::string_view text,
                                               F consume) {
-  // Classify every input byte once, rather than reclassifying an overlapping
-  // 32-byte window for each short word. Buffers are private to each worker.
-  static thread_local std::unique_ptr<char[]> lower;
-  static thread_local size_t capacity = 0;
-  static thread_local std::vector<uint32_t> masks;
-  if (capacity < text.size() + 64) {
-    capacity = (text.size() + 64) * 2;
-    lower = std::make_unique_for_overwrite<char[]>(capacity);
-  }
-  size_t blocks = (text.size() + 31) / 32;
-  masks.resize(blocks + 2);
-  masks[blocks] = masks[blocks + 1] = 0;
-  auto classify = [&](auto raw, size_t block) {
+  if (text.empty())
+    return;
+  // Only the final 64 input bytes need padding. Both classification and key
+  // loads can then cross the text boundary without crossing an allocation.
+  alignas(32) char tail[128]{};
+  size_t tail_start = text.size() > 64 ? text.size() - 64 : 0;
+  memcpy(tail, text.data() + tail_start, text.size() - tail_start);
+  auto folded_mask = [](__m256i raw) {
     auto folded = _mm256_or_si256(raw, _mm256_set1_epi8(32));
     auto letters =
         _mm256_and_si256(_mm256_cmpgt_epi8(folded, _mm256_set1_epi8('a' - 1)),
@@ -117,23 +117,8 @@ __attribute__((target("avx2"))) void tokenize(std::string_view text,
     auto digits =
         _mm256_and_si256(_mm256_cmpgt_epi8(raw, _mm256_set1_epi8('0' - 1)),
                          _mm256_cmpgt_epi8(_mm256_set1_epi8('9' + 1), raw));
-    masks[block] = _mm256_movemask_epi8(_mm256_or_si256(letters, digits));
-    _mm256_storeu_si256(reinterpret_cast<__m256i *>(lower.get() + block * 32),
-                        folded);
+    return uint32_t(_mm256_movemask_epi8(_mm256_or_si256(letters, digits)));
   };
-  size_t offset = 0;
-  for (; offset + 32 <= text.size(); offset += 32)
-    classify(_mm256_loadu_si256(
-                 reinterpret_cast<const __m256i *>(text.data() + offset)),
-             offset / 32);
-  if (offset < text.size()) {
-    char tail[32]{};
-    memcpy(tail, text.data() + offset, text.size() - offset);
-    classify(_mm256_loadu_si256(reinterpret_cast<const __m256i *>(tail)),
-             offset / 32);
-  }
-  _mm256_storeu_si256(reinterpret_cast<__m256i *>(lower.get() + text.size()),
-                      _mm256_setzero_si256());
   const auto positions = _mm256_setr_epi8(
       0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
       21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
@@ -141,26 +126,31 @@ __attribute__((target("avx2"))) void tokenize(std::string_view text,
     size_t size = last - first;
     if (size > 32)
       throw std::runtime_error("token exceeds spec bound");
-    auto key = _mm256_loadu_si256(
-        reinterpret_cast<const __m256i *>(lower.get() + first));
+    const char *p = first + 32 <= text.size() ? text.data() + first
+                                              : tail + first - tail_start;
+    auto raw = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
     auto keep = _mm256_cmpgt_epi8(_mm256_set1_epi8(size), positions);
-    char bytes[32];
-    _mm256_storeu_si256(reinterpret_cast<__m256i *>(bytes),
-                        _mm256_and_si256(key, keep));
-    if constexpr (std::is_invocable_r_v<bool, F, std::string_view, size_t>) {
-      if (!consume(std::string_view(bytes, size), first))
-        return false;
-    } else if (!consume(std::string_view(bytes, size)))
-      return false;
-    return true;
+    Key word;
+    _mm256_storeu_si256(
+        reinterpret_cast<__m256i *>(&word),
+        _mm256_and_si256(_mm256_or_si256(raw, _mm256_set1_epi8(32)), keep));
+    if constexpr (std::is_invocable_r_v<bool, F, const Key &, size_t>)
+      return consume(word, first);
+    else
+      return consume(word);
   };
   size_t pending = 0;
   uint64_t carry = 0;
-  for (size_t block = 0; block <= blocks; block += 2) {
-    uint64_t mask = uint64_t(masks[block]) | (uint64_t(masks[block + 1]) << 32);
-    uint64_t shifted = (mask << 1) | carry;
-    uint64_t starts = mask & ~shifted, ends = ~mask & shifted;
-    size_t base = block * 32;
+  for (size_t base = 0; base < text.size(); base += 64) {
+    const char *p = base + 64 <= text.size() ? text.data() + base
+                                             : tail + base - tail_start;
+    uint64_t mask =
+        folded_mask(_mm256_loadu_si256(reinterpret_cast<const __m256i *>(p))) |
+        (uint64_t(folded_mask(
+             _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p + 32))))
+         << 32);
+    uint64_t shifted = (mask << 1) | carry, starts = mask & ~shifted,
+             ends = ~mask & shifted;
     if (carry && ends) {
       if (!emit(pending, base + std::countr_zero(ends)))
         return;
@@ -178,17 +168,15 @@ __attribute__((target("avx2"))) void tokenize(std::string_view text,
       pending = base + std::countr_zero(starts);
     carry = mask >> 63;
   }
+  if (carry)
+    emit(pending, text.size());
 }
 struct Query {
   bool phrase;
   IDs terms, prefix;
   std::vector<char> ops;
 };
-struct Key {
-  uint64_t a = 0, b = 0, c = 0, d = 0;
-  bool operator==(const Key &) const = default;
-};
-uint64_t key_hash(Key k) {
+uint64_t key_hash(const Key &k) {
   uint64_t h =
       k.a ^ std::rotl(k.b, 17) ^ std::rotl(k.c, 31) ^ std::rotl(k.d, 47);
   h ^= h >> 33;
@@ -381,12 +369,11 @@ int main(int argc, char **argv) {
     auto hot_slot = [](uint64_t prefix) {
       return (prefix * 0x9e3779b97f4a7c15ULL) >> 56;
     };
-    auto lookup_term = [&](std::string_view token) {
+    auto lookup_term = [&](const Key &key) {
       // tokenize supplies a fully initialized, zero-padded 32-byte key. ASCII
       // alphanumerics contain no zero, so padding preserves exact token
       // identity.
-      Key key;
-      memcpy(&key, token.data(), sizeof(key));
+
       const auto &cached = hot[hot_slot(key.a)];
       if (cached.key == key)
         return cached.id;
@@ -441,7 +428,7 @@ int main(int argc, char **argv) {
     size_t sample_count = std::min<size_t>(4096, documents);
     for (size_t i = 0; i < sample_count; ++i) {
       uint32_t id = i;
-      tokenize(texts[id], [&](std::string_view token) {
+      tokenize(texts[id], [&](const Key &token) {
         uint32_t term = lookup_term(token);
         if (term != UINT32_MAX)
           ++sample_tokens[term];
@@ -513,7 +500,7 @@ int main(int argc, char **argv) {
       ShortIDs last(words.size(), UINT16_MAX);
       for (uint32_t id = starts[t]; id < starts[t + 1]; ++id) {
         uint16_t relative = id - starts[t];
-        tokenize(texts[id], [&](std::string_view token, size_t byte_offset) {
+        tokenize(texts[id], [&](const Key &token, size_t byte_offset) {
           uint32_t term = lookup_term(token);
           if (term != UINT32_MAX && position_ids[term] != UINT32_MAX &&
               texts[id].size() <= UINT16_MAX)
@@ -746,9 +733,7 @@ int main(int argc, char **argv) {
               return;
             size_t matched = 0;
             bool found = false;
-            tokenize(texts[doc], [&](std::string_view word) {
-              Key key;
-              memcpy(&key, word.data(), sizeof(key));
+            tokenize(texts[doc], [&](const Key &key) {
               while (matched && key != keys[q.terms[matched]])
                 matched = q.prefix[matched - 1];
               if (key == keys[q.terms[matched]])

@@ -76,3 +76,28 @@ Receipt for 4539ae4: run-5c282078959e, all gates passed,
 T=0.451909 s, M=137,101,312 bytes, S=866, K=13.875027, points=57.111692.
 This is 19.5% faster than the previous best practice run, and gains 2.20 points.
 The full independent seed-17 reference also matches exactly.
+
+Next candidate passes typed 32-byte keys directly through token callbacks,
+dictionary lookup and KMP verification. It removes intermediate byte-view/key
+copies while retaining identical ASCII boundaries and padding. Three alternating
+local runs gave median 1.2411 s versus 1.2788 s (about 3.0% lower). A bitmap-tile
+experiment and fused per-worker metadata did not establish a sufficient reliable
+gain after their costs and were not selected. Official measurement is pending.
+
+The selected tokenizer also streams 64-byte classification blocks directly from
+the input. A bounded 128-byte stack tail protects the last SIMD loads. Token
+bytes are lowercased as keys are emitted, so the worker no longer constructs a
+whole-document lowercase buffer and mask array first. Cross-block words, exact
+32-byte words, final words and early callback termination retain their semantics.
+
+Actual optimized PGO binaries were compared over six alternating warm runs:
+baseline median 0.85267 s, typed callbacks 0.82634 s, streaming callbacks
+0.82531 s. Absolute local timings are noisy. Streaming also reduces source and
+temporary storage. Prefix-only hashes, removing Bloom guards, larger positional
+coverage and an associative short-word cache failed to establish worthwhile
+gains and were rejected. Official measurement of the selected trial is pending.
+
+The selected source passes tiny/sample seeds 1/2, every tokenizer boundary and
+posting-overflow edge case at 1/6/12 workers, the sealed full-public Docker run,
+and the actual PGO executable against independent full seed 17
+(87c77cf18a8841688a551061db6253f7d542609e8f82c69cfe756eb7f8a463be).

@@ -172,3 +172,24 @@ Receipt for adb4712: run-a5bd15d5178c, all gates passed,
 T=0.047419 s, M=13,881,344 bytes, S=443, K=27.193895, points=71.723571.
 Against 9f7e74a, wall time fell 9.9% and K rose 4.1% despite the larger source.
 The compact exact C++ layout is retained.
+
+November 1 Rust trial: the complete mapped-input Rust implementation passes
+tiny/sample/full public seeds 1/2 and the CSV/concurrent/collision edge suite.
+It uses exact shared key publication, bounded AVX2 field scanning, full-key
+comparisons and an exact overflow map. After seed-17 PGO, nine adjacent pairs
+gave Rust/C++ median wall ratio 1.10117 and CPU ratio 1.12513. The candidate
+is preserved in experiments/rust-c; it does not justify a language switch.
+
+The selected parser trial checks up to three 32-byte AVX2 blocks for a closing
+quote before calling memchr for any remainder. Every load is bounded by the
+remaining mapping; escaped-quote parsing remains unchanged. Nine adjacent PGO
+pairs against the submitted parser gave median wall ratio 0.94507 and CPU
+ratio 0.96496, with unchanged full-public output and effectively unchanged
+peak RSS. Unlimited scanning and two-block scanning were less convincing.
+This is a local 5.5% gain, not an official score prediction.
+
+The parser trial passes tiny/sample/full public seeds 1/2, the shared exact
+membership/CSV edge suite, the sealed full-public Docker run and the actual
+PGO executable's independent full seed-17 reference
+(61979ece5ecf40733491d28fd2022e6f04a85dd53c4629410dfeb48bc3d20591).
+Official measurement is pending.

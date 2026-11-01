@@ -152,7 +152,7 @@ struct Field {
 };
 __attribute__((target("avx2"), always_inline)) inline const char *
 find_quote(const char *p, const char *end) {
-  if (end - p >= 32) {
+  for (unsigned scan = 0; scan < 3 && end - p >= 32; ++scan) {
     auto block = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
     uint32_t quotes =
         _mm256_movemask_epi8(_mm256_cmpeq_epi8(block, _mm256_set1_epi8('"')));

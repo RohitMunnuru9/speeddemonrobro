@@ -220,3 +220,17 @@ answers and the wide-distance/generation-wrap stress test. The queue also passes
 233,480 differential reference pops with wide keys, ties and resets. The actual
 sealed image passes full public seed 1, and its PGO executable matches the
 independent full seed-17 reference. Official measurement is pending.
+
+Receipt for d00f34a: run-5de48c7f21fb, all gates passed,
+T=0.202663 s, M=128,188,416 bytes, S=519, K=19.217440, points=64.184777.
+Against the preceding best T=0.232462 s, official runtime fell 12.8% and
+points rose from 63.013350. This is smaller than the local paired gain.
+
+Further November 1 trials: a Rust search engine with the same prefetch batches
+and C++ graph builder passes the six public datasets, 9,000 independent graph
+answers and the wide-label/generation-wrap test. Nine paired PGO runs gave
+Rust/C++ median wall ratio 1.06865 and CPU ratio 1.09415. It is preserved in
+experiments/rust-d, not selected. Two-pass direct graph layouts saved roughly
+18% local peak RSS but were 32–33% slower; a wider-digit heap was essentially
+tied. Direct chain walking was slower, and pruning paths above the current
+complete-path upper bound was essentially tied. These trials are not submitted.

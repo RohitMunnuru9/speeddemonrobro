@@ -234,3 +234,35 @@ experiments/rust-d, not selected. Two-pass direct graph layouts saved roughly
 18% local peak RSS but were 32–33% slower; a wider-digit heap was essentially
 tied. Direct chain walking was slower, and pruning paths above the current
 complete-path upper bound was essentially tied. These trials are not submitted.
+
+Receipt for 1589306, with unchanged D code: run-3fb03ac0d003, all gates passed,
+T=0.188206 s, M=130,605,056 bytes, S=519, K=19.867526, points=64.907190.
+The lower runtime is run variation, not evidence of another D code improvement.
+
+Next D-first trial retains owner-routed construction but uses six bytes for
+ordinary temporary rows. Local/opposite IDs and 15-bit weights fit below an
+escape flag; larger weights retain the original exact uint64 row in a side
+array. When a coarse bucket fills, every existing packed row is decoded into
+the exact growing overflow. Both forms expose the same logical row interface.
+
+Search now prefetches own-direction label slots for inline neighbors after
+prefetching the batch's node records. Seven adjacent actual PGO comparisons of
+this combined design gave median wall ratio 0.98493, CPU ratio 1.01663 and
+process peak-RSS ratio 0.89638. RSS includes mapped input and is not the scoring
+cgroup memory axis. A formatted range-view implementation also matches the
+public full output and gave a 0.9556 native wall ratio in a shorter comparison.
+This is a time/memory/source tradeoff requiring an official K comparison.
+
+Neighbor prefetching alone gave PGO wall ratio 0.94863; compact storage alone
+gave 1.04155. Prefetching opposite labels or every overflow neighbor was weaker.
+Specializing the edge decoder did not establish an additional gain.
+
+The selected combination passes public tiny/sample/full seeds 1/2, the 9,000
+independent graph answers and the 2,054-answer wide-distance/generation test.
+A new concentrated-star test checks 184 answers across one/twelve search
+workers while all six parser workers overflow their coarse buckets with mixed
+ordinary, escaped and UINT32_MAX-weight rows.
+
+The actual sealed image passes full public seed 1. Its optimized PGO executable
+also matches the independent full seed-17 reference
+(ad7c211024014a4c21a50faab598dd19e730cbc0b4e8013a7d3b3306132913ba).

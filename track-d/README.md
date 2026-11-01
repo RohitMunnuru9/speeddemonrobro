@@ -33,6 +33,12 @@ are written after joining workers, in original query order.
 A 64-bit occupancy mask identifies the next positive radix bucket. Redistributing
 keys updates the mask; the monotone-heap ordering and full-width keys are unchanged.
 
+Redistribution prefetches graph nodes and label slots for the next minimum key.
+Workers then process up to sixteen entries already sharing that key, giving
+memory reads time to arrive. Batches never advance the heap to a future key
+before relaxing the current vertices. Distances, stale-entry checks, zero-weight
+handling and the bidirectional stopping bound remain exact.
+
 A query whose target has no incoming edges, or whose source has no outgoing
 edges, is unreachable unless source equals target. These graph facts are computed
 from the current input. Parallel edges, zero weights and duplicate queries need

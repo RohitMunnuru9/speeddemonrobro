@@ -27,13 +27,15 @@ struct RadixHeap {
       active |= uint64_t{1} << (b - 1);
     ++count;
   }
-  uint64_t minimum() {
+  template <class Prefetch> uint64_t minimum(Prefetch prefetch) {
     if (buckets[0].empty()) {
       unsigned b = std::countr_zero(active) + 1;
       last = UINT64_MAX;
       for (auto item : buckets[b])
         last = std::min(last, item.first);
       for (auto item : buckets[b]) {
+        if (item.first == last)
+          prefetch(item.second);
         unsigned dest = bucket(last ^ item.first);
         buckets[dest].push_back(item);
         if (dest)
@@ -43,6 +45,9 @@ struct RadixHeap {
       active &= ~(uint64_t{1} << (b - 1));
     }
     return last;
+  }
+  uint64_t minimum() {
+    return minimum([](uint32_t) {});
   }
   Item pop() {
     minimum();
@@ -339,6 +344,16 @@ int main(int argc, char **argv) {
     parallel(workers, [&](size_t) {
       std::array<SearchState, 2> state{SearchState(n), SearchState(n)};
       std::array<RadixHeap, 2> heap;
+      auto minimum = [&](unsigned side) {
+        return heap[side].minimum([&](uint32_t u) {
+          __builtin_prefetch(nodes[side].get() + u, 0, 3);
+          __builtin_prefetch(
+              state[side].entries.data() +
+                  (SearchState::hash(u) & (state[side].entries.size() - 1)),
+              0, 3);
+        });
+      };
+
       for (;;) {
         size_t i = next.fetch_add(1);
         if (i >= queries.size())
@@ -362,34 +377,53 @@ int main(int argc, char **argv) {
         // Every meeting candidate is a real directed s->t path. Stop when the
         // two unsettled minima cannot improve the best such path.
         while (heap[0].count && heap[1].count) {
-          uint64_t a = heap[0].minimum(), b = heap[1].minimum();
+          uint64_t a = minimum(0), b = minimum(1);
           if (best != UINT64_MAX && a + b >= best)
             break;
           unsigned side = heap[0].count <= heap[1].count ? 0 : 1,
                    other = side ^ 1;
-          auto [d, u] = heap[side].pop();
-          if (d != state[side].get(u))
-            continue;
-          if (auto opposite = state[other].cross(u); opposite != UINT64_MAX)
-            best = std::min(best, d + opposite);
-          auto visit = [&](uint32_t code) {
-            auto [v, w] = decode(side, code);
-            uint64_t nd = d + w;
-            if (state[side].relax(v, nd)) {
-              heap[side].push(nd, v);
-              if (auto opposite = state[other].cross(v); opposite != UINT64_MAX)
-                best = std::min(best, nd + opposite);
-            }
-          };
-          const auto &node = nodes[side][u];
-          uint32_t first = node.range & offset_mask,
-                   last = nodes[side][u + 1].range & offset_mask;
-          if (first < last)
-            __builtin_prefetch(edges[side].get() + first, 0, 1);
-          for (unsigned k = 0; k < (node.range >> 30); ++k)
-            visit(node.arcs[k]);
-          for (uint32_t e = first; e < last; ++e)
-            visit(edges[side][e]);
+          // These entries all have the same key. Stop at the zero bucket's
+          // end: looking up the next minimum would advance the monotone heap
+          // before the current vertices have relaxed their edges.
+          std::array<Item, 16> batch;
+          size_t count = 0;
+          do {
+            auto item = heap[side].pop();
+            batch[count++] = item;
+            uint32_t u = item.second;
+            __builtin_prefetch(nodes[side].get() + u, 0, 3);
+            __builtin_prefetch(
+                state[side].entries.data() +
+                    (SearchState::hash(u) & (state[side].entries.size() - 1)),
+                0, 3);
+          } while (count < batch.size() && !heap[side].buckets[0].empty());
+          for (size_t j = 0; j < count; ++j) {
+            auto [d, u] = batch[j];
+
+            if (d != state[side].get(u))
+              continue;
+            if (auto opposite = state[other].cross(u); opposite != UINT64_MAX)
+              best = std::min(best, d + opposite);
+            auto visit = [&](uint32_t code) {
+              auto [v, w] = decode(side, code);
+              uint64_t nd = d + w;
+              if (state[side].relax(v, nd)) {
+                heap[side].push(nd, v);
+                if (auto opposite = state[other].cross(v);
+                    opposite != UINT64_MAX)
+                  best = std::min(best, nd + opposite);
+              }
+            };
+            const auto &node = nodes[side][u];
+            uint32_t first = node.range & offset_mask,
+                     last = nodes[side][u + 1].range & offset_mask;
+            if (first < last)
+              __builtin_prefetch(edges[side].get() + first, 0, 1);
+            for (unsigned k = 0; k < (node.range >> 30); ++k)
+              visit(node.arcs[k]);
+            for (uint32_t e = first; e < last; ++e)
+              visit(edges[side][e]);
+          }
         }
         if (best != UINT64_MAX)
           answers[i] = best;

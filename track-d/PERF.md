@@ -189,3 +189,34 @@ Receipt for adb4712: run-16272588120f, all gates passed,
 T=0.232462 s, M=124,387,328 bytes, S=490, K=18.208199, points=63.013350.
 Against the prior best at ee47856, wall time fell 22.7%, memory fell 3.9% and
 K rose 13.4%. The combined inline-node/packed-label layout is retained.
+
+November 1: D-first optimization. A Rust search engine was built against the
+same C++ graph arrays and checked against the full public hash. Seven alternating
+unprofiled native runs gave medians 0.45182 s (Rust) and 0.43886 s (C++). This
+does not establish a Rust advantage, so the measured C++ implementation remains.
+
+Chain contraction, graph relabelling, landmark A*, parallel landmark setup,
+dense/shared labels and alternative queues all matched the public full output
+but did not establish an overall gain after preprocessing, source and memory
+costs. They are not part of the selected submission.
+
+The selected change overlaps graph/label reads with queue work. Radix
+redistribution prefetches vertices at its new minimum key. A worker then removes
+up to sixteen entries already in that zero bucket and prefetches their graph
+records and own-direction label slots before expansion. It does not inspect a
+future bucket during collection, which would advance the monotone heap before
+the current batch can insert zero/small-weight relaxations. Stale entries are
+still checked individually; the original distance and stopping rules remain.
+
+Five adjacent pairs of actual optimized PGO binaries gave a median candidate /
+baseline wall-time ratio of 0.62066 and CPU-time ratio of 0.62058. This is about
+38% lower local time, not an official measurement or a 90% improvement. The
+development machine was noisy, so each candidate was compared with an adjacent
+baseline run. Wider filters, split key/node queue storage and huge-page hints
+were not consistently better and were left out of this trial.
+
+Tiny/sample/full seeds 1/2 match, as do 9,000 independent arbitrary-graph
+answers and the wide-distance/generation-wrap stress test. The queue also passes
+233,480 differential reference pops with wide keys, ties and resets. The actual
+sealed image passes full public seed 1, and its PGO executable matches the
+independent full seed-17 reference. Official measurement is pending.

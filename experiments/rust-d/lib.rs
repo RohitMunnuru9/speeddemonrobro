@@ -4,8 +4,21 @@ use std::{
     thread,
 };
 type Item = (u64, u32);
+
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+const WINDOW: usize = 1024;
+#[derive(Clone, Copy)]
+struct Link {
+    node: u32,
+    next: u32,
+}
 struct Heap {
-    buckets: [Vec<Item>; 65],
+    heads: [u32; WINDOW],
+    bits: [u64; WINDOW / 64],
+    arena: Vec<Link>,
+    far: BinaryHeap<Reverse<Item>>,
+    free: u32,
     last: u64,
     count: usize,
     active: u64,
@@ -13,7 +26,11 @@ struct Heap {
 impl Default for Heap {
     fn default() -> Self {
         Self {
-            buckets: std::array::from_fn(|_| Vec::new()),
+            heads: [u32::MAX; WINDOW],
+            bits: [0; WINDOW / 64],
+            arena: Vec::new(),
+            far: BinaryHeap::new(),
+            free: u32::MAX,
             last: 0,
             count: 0,
             active: 0,
@@ -22,57 +39,118 @@ impl Default for Heap {
 }
 impl Heap {
     #[inline(always)]
-    fn bucket(value: u64) -> usize {
-        (64 - value.leading_zeros()) as usize
+    fn near(&mut self, key: u64, node: u32) {
+        let slot = key as usize & (WINDOW - 1);
+        let id;
+        if self.free == u32::MAX {
+            id = self.arena.len() as u32;
+            assert_ne!(id, u32::MAX);
+            self.arena.push(Link {
+                node,
+                next: self.heads[slot],
+            });
+        } else {
+            id = self.free;
+            self.free = self.arena[id as usize].next;
+            self.arena[id as usize] = Link {
+                node,
+                next: self.heads[slot],
+            };
+        }
+        self.heads[slot] = id;
+        self.bits[slot / 64] |= 1u64 << (slot % 64);
+        self.active |= 1u64 << (slot / 64);
     }
     #[inline(always)]
     fn push(&mut self, key: u64, node: u32) {
-        let b = Self::bucket(self.last ^ key);
-        self.buckets[b].push((key, node));
-        if b != 0 {
-            self.active |= 1u64 << (b - 1);
+        debug_assert!(key >= self.last);
+        if key - self.last < WINDOW as u64 {
+            self.near(key, node);
+        } else {
+            self.far.push(Reverse((key, node)));
         }
         self.count += 1;
     }
     #[inline(always)]
+    fn ready(&self) -> bool {
+        self.heads[self.last as usize & (WINDOW - 1)] != u32::MAX
+    }
+    fn next_near(&self) -> u64 {
+        let current = self.last as usize & (WINDOW - 1);
+        let mut word = current / 64;
+        let bits = self.bits[word] & (u64::MAX << (current % 64));
+        let slot;
+        if bits != 0 {
+            slot = word * 64 + bits.trailing_zeros() as usize;
+        } else {
+            let later = self.active & (u64::MAX << (word + 1));
+            word = if later != 0 { later } else { self.active }.trailing_zeros() as usize;
+            slot = word * 64 + self.bits[word].trailing_zeros() as usize;
+        }
+        self.last + ((slot.wrapping_sub(current)) & (WINDOW - 1)) as u64
+    }
+    #[inline(always)]
     fn minimum_with(&mut self, mut prefetch: impl FnMut(u32)) -> u64 {
-        if self.buckets[0].is_empty() {
-            let b = self.active.trailing_zeros() as usize + 1;
-            let mut values = std::mem::take(&mut self.buckets[b]);
-            self.last = values.iter().map(|v| v.0).min().unwrap();
-            for &item in &values {
-                if item.0 == self.last {
-                    prefetch(item.1);
-                }
-                let dest = Self::bucket(self.last ^ item.0);
-                self.buckets[dest].push(item);
-                if dest != 0 {
-                    self.active |= 1u64 << (dest - 1);
-                }
+        if self.ready() {
+            return self.last;
+        }
+        let next = if self.active != 0 {
+            self.next_near()
+        } else {
+            u64::MAX
+        };
+        if self
+            .far
+            .peek()
+            .is_some_and(|Reverse(item)| self.active == 0 || item.0 < next)
+        {
+            self.last = self.far.peek().unwrap().0 .0;
+            while self
+                .far
+                .peek()
+                .is_some_and(|Reverse(item)| item.0 - self.last < WINDOW as u64)
+            {
+                let Reverse((key, node)) = self.far.pop().unwrap();
+                self.near(key, node);
             }
-            values.clear();
-            self.buckets[b] = values;
-            self.active &= !(1u64 << (b - 1));
+        } else {
+            self.last = next;
+        }
+        let mut at = self.heads[self.last as usize & (WINDOW - 1)];
+        while at != u32::MAX {
+            let link = self.arena[at as usize];
+            prefetch(link.node);
+            at = link.next;
         }
         self.last
     }
     #[inline(always)]
-    fn minimum(&mut self) -> u64 {
-        self.minimum_with(|_| {})
-    }
-    #[inline(always)]
     fn pop(&mut self) -> Item {
-        self.minimum();
+        self.minimum_with(|_| {});
+        let slot = self.last as usize & (WINDOW - 1);
+        let id = self.heads[slot];
+        let link = self.arena[id as usize];
+        self.heads[slot] = link.next;
+        self.arena[id as usize].next = self.free;
+        self.free = id;
+        if self.heads[slot] == u32::MAX {
+            self.bits[slot / 64] &= !(1u64 << (slot % 64));
+            if self.bits[slot / 64] == 0 {
+                self.active &= !(1u64 << (slot / 64));
+            }
+        }
         self.count -= 1;
-        self.buckets[0].pop().unwrap()
+        (self.last, link.node)
     }
     fn clear(&mut self) {
-        for bucket in &mut self.buckets {
-            bucket.clear();
-        }
+        self.heads.fill(u32::MAX);
+        self.bits.fill(0);
+        self.arena.clear();
+        self.far.clear();
+        self.free = u32::MAX;
+        self.active = 0;
         self.last = 0;
         self.count = 0;
-        self.active = 0;
     }
 }
 struct State {
@@ -152,20 +230,25 @@ impl State {
             self.get(node)
         }
     }
+    #[cold]
+    #[inline(never)]
+    fn grow(&mut self) {
+        let length = self.entries.len() * 2;
+        let old = std::mem::replace(&mut self.entries, vec![0; length]);
+        for entry in old {
+            if entry as u32 & self.epoch_mask == self.tag {
+                let mut slot = Self::hash(entry as u32 & self.node_mask) & (length - 1);
+                while self.entries[slot] as u32 & self.epoch_mask == self.tag {
+                    slot = (slot + 1) & (length - 1);
+                }
+                self.entries[slot] = entry;
+            }
+        }
+    }
     #[inline(always)]
     fn relax(&mut self, node: u32, value: u64) -> bool {
         if (self.used + 1) * 4 > self.entries.len() * 3 {
-            let length = self.entries.len() * 2;
-            let old = std::mem::replace(&mut self.entries, vec![0; length]);
-            for entry in old {
-                if entry as u32 & self.epoch_mask == self.tag {
-                    let mut slot = Self::hash(entry as u32 & self.node_mask) & (length - 1);
-                    while self.entries[slot] as u32 & self.epoch_mask == self.tag {
-                        slot = (slot + 1) & (length - 1);
-                    }
-                    self.entries[slot] = entry;
-                }
-            }
+            self.grow();
         }
         let mask = self.entries.len() - 1;
         let mut slot = Self::hash(node) & mask;
@@ -350,17 +433,28 @@ pub unsafe extern "C" fn vayu_solve(
                             batch[count] = item;
                             count += 1;
                             graph.prefetch(side, item.1, &state[side]);
-                            if count == 16 || heap[side].buckets[0].is_empty() {
+                            if count == 16 || !heap[side].ready() {
                                 break;
+                            }
+                        }
+
+                        for &(_, u) in &batch[..count] {
+                            let node = &graph.nodes[side][u as usize];
+                            for &code in &node.arcs[..(node.range >> 30) as usize] {
+                                let (v, _) = graph.decode(side, code);
+                                std::arch::x86_64::_mm_prefetch(
+                                    state[side]
+                                        .entries
+                                        .as_ptr()
+                                        .add(State::hash(v) & (state[side].entries.len() - 1))
+                                        .cast(),
+                                    3,
+                                );
                             }
                         }
                         for &(d, u) in &batch[..count] {
                             if d != state[side].get(u) {
                                 continue;
-                            }
-                            let opposite = state[other].cross(u);
-                            if opposite != u64::MAX {
-                                best = best.min(d + opposite);
                             }
                             graph.visit(side, u, |v, w| {
                                 let nd = d + u64::from(w);

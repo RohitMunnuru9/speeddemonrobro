@@ -43,7 +43,10 @@ int main(){
   }
   if(epoch%2)while(!oracle.empty())pop();
  }
- std::cout<<"D queue: "<<checked<<" reference pops passed; wide keys, wraps, duplicates and resets\n";
+ queue.clear();queue.push(UINT64_MAX,17);
+ if(queue.minimum()!=UINT64_MAX || queue.pop()!=std::pair<uint64_t,uint32_t>{UINT64_MAX,17} || queue.count)
+  throw std::runtime_error("far-only UINT64_MAX key differs");
+ std::cout<<"D queue: "<<checked<<" reference pops plus UINT64_MAX passed; wide keys, wraps, duplicates and resets\n";
 }
 '''
 with tempfile.TemporaryDirectory() as folder:

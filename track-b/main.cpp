@@ -369,15 +369,7 @@ int main(int argc, char **argv) {
     auto hot_slot = [](uint64_t prefix) {
       return (prefix * 0x9e3779b97f4a7c15ULL) >> 56;
     };
-    auto lookup_term = [&](const Key &key) {
-      // tokenize supplies a fully initialized, zero-padded 32-byte key. ASCII
-      // alphanumerics contain no zero, so padding preserves exact token
-      // identity.
-
-      const auto &cached = hot[hot_slot(key.a)];
-      if (cached.key == key)
-        return cached.id;
-      uint64_t hash = key_hash(key);
+    auto lookup_prepared = [&](const Key &key, uint64_t hash) {
       uint64_t mask =
           (uint64_t{1} << (hash & 63)) | (uint64_t{1} << ((hash >> 6) & 63));
       if ((bloom[(hash >> 12) & (bloom.size() - 1)] & mask) != mask)
@@ -391,6 +383,11 @@ int main(int argc, char **argv) {
         slot = (slot + 1) & (capacity - 1);
       }
       return UINT32_MAX;
+    };
+    auto lookup_term = [&](const Key &key) {
+      const auto &cached = hot[hot_slot(key.a)];
+      return cached.key == key ? cached.id
+                               : lookup_prepared(key, key_hash(key));
     };
     // PROFILE_PREPARED_QUERIES
     size_t documents = 0;
@@ -498,16 +495,29 @@ int main(int argc, char **argv) {
       }
       buffer.values.resize(total);
       ShortIDs last(words.size(), UINT16_MAX);
+      struct Pending {
+        Key token;
+        uint64_t hash;
+        size_t byte_offset;
+        uint32_t term;
+      };
+      std::array<Pending, 8> pending;
+      // Retire in token order so positional postings stay sorted. Only this
+      // document's tokens are queued; a document boundary drains every token.
       for (uint32_t id = starts[t]; id < starts[t + 1]; ++id) {
         uint16_t relative = id - starts[t];
-        tokenize(texts[id], [&](const Key &token, size_t byte_offset) {
-          uint32_t term = lookup_term(token);
+        size_t seen = 0;
+        auto retire = [&](const Pending &item) {
+          const auto &token = item.token;
+          size_t byte_offset = item.byte_offset;
+          uint32_t term =
+              item.hash ? lookup_prepared(token, item.hash) : item.term;
           if (term != UINT32_MAX && position_ids[term] != UINT32_MAX &&
               texts[id].size() <= UINT16_MAX)
             positions[t][position_ids[term]].push_back(
                 (uint32_t(relative) << 16) | uint32_t(byte_offset));
           if (term == UINT32_MAX || last[term] == relative)
-            return true;
+            return;
           last[term] = relative;
           if (!bitmaps[term].empty())
             bitmaps[term][id / 64] |= uint64_t{1} << (id % 64);
@@ -526,8 +536,26 @@ int main(int argc, char **argv) {
             }
             ++posting.count;
           }
+        };
+        tokenize(texts[id], [&](const Key &token, size_t byte_offset) {
+          const auto &cached = hot[hot_slot(token.a)];
+          uint64_t hash = 0;
+          uint32_t term = cached.id;
+          if (cached.key != token) {
+            hash = key_hash(token);
+            __builtin_prefetch(table.data() + (hash & (capacity - 1)), 0, 1);
+            __builtin_prefetch(
+                bloom.data() + ((hash >> 12) & (bloom.size() - 1)), 0, 1);
+          }
+          size_t slot = seen % pending.size();
+          if (seen >= pending.size())
+            retire(pending[slot]);
+          pending[slot] = {token, hash, byte_offset, term};
+          ++seen;
           return true;
         });
+        for (size_t k = seen - std::min(seen, pending.size()); k < seen; ++k)
+          retire(pending[k % pending.size()]);
       }
     });
     // PROFILE_INDEX_DONE

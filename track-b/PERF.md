@@ -107,3 +107,23 @@ T=0.422194 s, M=136,933,376 bytes, S=849, K=14.401287, points=57.920065.
 Previous best: T=0.424208 s, K=14.348427, points=57.840215. Runtime is nearly
 unchanged; smaller source offsets slightly higher memory. This is a small K
 gain and does not establish a substantial speedup.
+
+November 2 final trial: overlap eight exact token lookups during index creation.
+The sampled hot-key cache still compares all 32 initialized key bytes. Other
+tokens carry a precomputed hash, and prefetch the Bloom word and dictionary
+home slot before retirement. Bloom positives and hash collisions still require
+the original exact key comparisons. Retirement preserves token order and drains
+at each document boundary, preserving sorted positional postings and duplicate
+suppression. The pending array is allocated once per worker, not per document.
+
+Eight warm adjacent actual PGO pairs against the submitted streaming tokenizer
+gave candidate/current median wall ratio 0.94773, CPU ratio 0.95435 and process
+peak-RSS ratio 0.99996. Wider 16/32-token windows were slower and are excluded.
+These are four-CPU development measurements, not predicted official scores.
+Public full output and tokenizer/posting edge cases pass; final sealed checks
+and the official receipt are recorded with the final submission.
+
+The final offline, unprivileged, network-sealed full-public runtime matches
+f86973c210228141bcb6f1f1b10188ad2a9b65f71e7cd7cf4590b38de4e80927.
+Its actual optimized binary also matches the saved independent full seed-17
+reference, 87c77cf18a8841688a551061db6253f7d542609e8f82c69cfe756eb7f8a463be.

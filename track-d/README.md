@@ -16,7 +16,7 @@ overflow range fit in one 16-byte node record. Higher degrees use exact compact
 overflow; degrees are unrestricted. Overflow data is prefetched before processing
 the inline arcs, avoiding a dependent adjacency read for most low-degree nodes.
 
-Queries use bidirectional Dijkstra with uint64 distances and monotone radix heaps.
+Queries use bidirectional Dijkstra with uint64 distances and exact monotone queues.
 Twelve workers claim queries from an atomic counter. Each worker keeps an exact
 flat hash table of visited nodes in each direction. An 8-KiB bit filter rejects
 definite opposite-direction misses; every possible hit still checks the exact
@@ -30,10 +30,13 @@ The smaller frontier is expanded; termination
 requires the two heap minima to reach the best complete path found. Results
 are written after joining workers, in original query order.
 
-A 64-bit occupancy mask identifies the next positive radix bucket. Redistributing
-keys updates the mask; the monotone-heap ordering and full-width keys are unchanged.
+A circular window holds the next 1,024 distances. Bitsets find its next occupied
+slot, and a reusable arena recycles the links holding queued vertices. Larger
+keys remain in a full uint64 ordered heap. Both minima are compared before the
+window advances; only keys within its new range are promoted. This preserves
+wide distances and avoids an allocation/vector for every distance slot.
 
-Redistribution prefetches graph nodes and label slots for the next minimum key.
+Advancing the queue prefetches graph nodes and label slots for the next minimum key.
 Workers then process up to sixteen entries already sharing that key, giving
 memory reads time to arrive. Batches never advance the heap to a future key
 before relaxing the current vertices. Distances, stale-entry checks, zero-weight

@@ -153,3 +153,12 @@ including 18,963 shuffled stress records. The actual offline runtime passes
 sealed full seeds 1 and 17; seed-17 output matches the saved independent
 reference hash 8425e98480a26cf8de7a49507752da24fe522fe47814107b8d1870681365989a.
 Official performance is pending.
+
+November 2 final trial: the parallel-teardown experiment at dbc9cb4 passed
+all gates in run-67154132106a, but scored 74.086455 (T=0.049945 s,
+M=21,770,240, S=387). Restore the exact A source from e71d607, verified identical
+to the retained-best ee47856 source (75.625792). Reusing index workers for the
+hour phase was 3.3% slower locally; a bounded 96-byte parser extension and an
+initial latency-vector reserve also failed to improve complete runtime. None
+of those additional experiments is selected. Restoring A is a regression fix,
+not a claim of a new algorithmic gain.

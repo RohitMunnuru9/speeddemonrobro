@@ -302,3 +302,41 @@ writes makes that oracle fail. Public seeds 1/2 at all three scales, the graph
 edge suite, wide-distance/generation stress and the bucket-migration star pass.
 The sealed full-public image passes; its PGO executable matches the existing
 independent full seed-17 reference. Official performance is pending.
+
+November 2 final trial: dbc9cb4 passed all gates in run-6345e74459c2,
+T=0.195748 s, M=130,674,688, S=547, K=19.326026, points=64.307128.
+It did not exceed the retained 64.907190 best.
+
+Replace the search radix heap with an exact 1,024-distance circular window.
+Window slots contain linked lists in one reusable arena; popped links return
+to a free list. Keys outside the window remain full uint64 entries in an
+ordered heap. The next minimum compares both representations before advancing,
+then promotes only keys fitting the new window. This includes the far-only
+UINT64_MAX case. Equal-key batches stop before advancing the queue, preserving
+monotone insertion even with zero-weight arcs. Move rare table growth and wide
+label encoding into cold helpers; full-key comparisons and mirrors remain.
+
+Eleven adjacent actual PGO comparisons against dbc9cb4 gave median wall ratio
+0.94921, CPU ratio 0.93122 and process peak-RSS ratio 1.00099. Keeping persistent
+construction workers was less convincing after PGO and is excluded. BFS-based
+graph relabeling was slower after including its setup and is also excluded.
+
+A new independently implemented Rust arena-queue solver was tested against the
+same immutable C++ graph builder. Its first unprofiled comparison was 13% faster,
+but actual PGO comparisons were approximately tied (roughly 0.97 to 1.00 wall
+ratios across trials), with more formatted source. Unchecked hot accesses and
+four-lane mirrored probes did not establish a further gain. Rust is preserved
+under experiments/rust-d, not selected for the submitted track. Its independent
+Rust oracles pass 1,408,200 label updates and 233,724 queue pops, including wide
+keys, wraparound, generation reuse and UINT64_MAX. The regular Rust graph solver
+also passes the arbitrary-graph, wide-distance and concentrated-star suites.
+
+The selected C++ queue passes 233,480 independent queue pops, 783,636 label
+updates, 9,000 Bellman-Ford graph answers, 2,054 wide/generation answers and
+184 packed/wide/migration star answers. Local full-public output is exact.
+The official result is still pending; no 80-point result is claimed.
+
+The final offline, unprivileged, network-sealed runtime matches full public
+seed 1, a23dbdf0a3e49cc8901310a9ee1dc6a9a569a85297b6da75c2a7002cb2ed277e.
+Its actual optimized binary also matches the saved independent full seed-17
+reference, ad7c211024014a4c21a50faab598dd19e730cbc0b4e8013a7d3b3306132913ba.

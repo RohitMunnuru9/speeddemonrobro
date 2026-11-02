@@ -162,3 +162,6 @@ hour phase was 3.3% slower locally; a bounded 96-byte parser extension and an
 initial latency-vector reserve also failed to improve complete runtime. None
 of those additional experiments is selected. Restoring A is a regression fix,
 not a claim of a new algorithmic gain.
+
+Restored-source receipt at 17c357c: run-52c9bf5f550c, all gates passed,
+T=0.045429 s, S=371, points=75.098836. The 75.625792 best remains retained.

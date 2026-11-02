@@ -15,7 +15,9 @@ The actual submission build, with independently generated seed-17 training,
 was approximately tied with optimized C++; unchecked-access and SIMD variants
 did not establish a further gain. The C++ recycled-arena queue was about 5%
 faster in the final optimized comparison and uses less formatted source, so it
-was selected. Full measurements are in ../measurements/final-*-pairs.txt and
+was selected for one official trial. That trial scored 64.556962, below the
+retained 64.907190 best, and the frozen code restores the old radix queue.
+Full measurements are in ../measurements/final-*-pairs.txt and
 final-d-selection.txt; their reused harness labels are identified below.
 
 In final-d-selection.txt, `current` is the submitted dbc9cb4 optimized C++,

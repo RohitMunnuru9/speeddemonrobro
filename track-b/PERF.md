@@ -127,3 +127,10 @@ The final offline, unprivileged, network-sealed full-public runtime matches
 f86973c210228141bcb6f1f1b10188ad2a9b65f71e7cd7cf4590b38de4e80927.
 Its actual optimized binary also matches the saved independent full seed-17
 reference, 87c77cf18a8841688a551061db6253f7d542609e8f82c69cfe756eb7f8a463be.
+
+Official trial 17c357c, run-a7b0a8cde608: all gates passed, T=0.474182 s,
+S=879, points=56.565269. The local gain did not transfer to the scorer.
+Reject this trial and restore the exact main.cpp from adb4712, whose retained
+best is 57.920065. Dockerfile, header and training generator are byte-equivalent
+to that retained-best configuration (apart from newline conventions). The
+experiment and measurements remain in git history and experiments/measurements.

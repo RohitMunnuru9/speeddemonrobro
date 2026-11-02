@@ -340,3 +340,11 @@ The final offline, unprivileged, network-sealed runtime matches full public
 seed 1, a23dbdf0a3e49cc8901310a9ee1dc6a9a569a85297b6da75c2a7002cb2ed277e.
 Its actual optimized binary also matches the saved independent full seed-17
 reference, ad7c211024014a4c21a50faab598dd19e730cbc0b4e8013a7d3b3306132913ba.
+
+Official trial 17c357c, run-bbcbd2c1df31: all gates passed, T=0.189246 s,
+S=595, points=64.556962. Runtime improved against dbc9cb4 but source cost
+prevented beating the retained 64.907190 best (T=0.188206, S=519).
+Reject the arena trial and restore the exact main.cpp/README from 1589306.
+The header, Dockerfile and training generator already match that configuration.
+The frozen code therefore uses the validated radix queue, packed scalar labels
+and batched node/label prefetching, not the experimental Rust or arena queue.

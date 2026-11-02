@@ -5,7 +5,6 @@
 #include <bit>
 #include <cstdlib>
 #include <filesystem>
-#include <immintrin.h>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -13,77 +12,38 @@
 #include <utility>
 
 using Item = std::pair<uint64_t, uint32_t>;
-// Exact monotone queue: nearby keys use a circular window; all other uint64
-// keys remain in an ordered heap. Recycled links avoid one allocation/vector
-// per distance. A slot cannot alias two live distances inside the window.
-template <unsigned Window> struct DialQueue {
-  static_assert(std::has_single_bit(Window) && Window >= 64 && Window <= 4096);
-  struct Link {
-    uint32_t node, next;
-  };
-  std::array<uint32_t, Window> heads;
-  std::array<uint64_t, Window / 64> occupied{};
-  std::vector<Link> arena;
-  std::vector<Item> far;
-  uint32_t free = UINT32_MAX;
-  uint64_t active = 0, last = 0;
+struct RadixHeap {
+  std::array<std::vector<Item>, 65> buckets;
+  uint64_t last = 0;
   size_t count = 0;
-  DialQueue() { heads.fill(UINT32_MAX); }
-  void near(uint64_t key, uint32_t node) {
-    uint32_t slot = key & (Window - 1), id;
-    if (free != UINT32_MAX) {
-      id = free;
-      free = arena[id].next;
-      arena[id] = {node, heads[slot]};
-    } else {
-      id = arena.size();
-      arena.push_back({node, heads[slot]});
-    }
-    heads[slot] = id;
-    occupied[slot / 64] |= uint64_t{1} << (slot % 64);
-    active |= uint64_t{1} << (slot / 64);
+  uint64_t active = 0;
+  static unsigned bucket(uint64_t difference) {
+    return difference ? 64 - __builtin_clzll(difference) : 0;
   }
   void push(uint64_t key, uint32_t node) {
-    if (key - last < Window)
-      near(key, node);
-    else {
-      far.emplace_back(key, node);
-      std::push_heap(far.begin(), far.end(), std::greater<Item>{});
-    }
+    unsigned b = bucket(last ^ key);
+    buckets[b].emplace_back(key, node);
+    if (b)
+      active |= uint64_t{1} << (b - 1);
     ++count;
   }
-  uint64_t next_near() const {
-    unsigned current = last & (Window - 1), word = current / 64;
-    uint64_t bits = occupied[word] & (UINT64_MAX << (current % 64));
-    unsigned slot;
-    if (bits)
-      slot = word * 64 + std::countr_zero(bits);
-    else {
-      uint64_t later = word == 63 ? 0 : active & (UINT64_MAX << (word + 1));
-      word = std::countr_zero(later ? later : active);
-      slot = word * 64 + std::countr_zero(occupied[word]);
-    }
-    return last + ((slot - current) & (Window - 1));
-  }
-  bool ready() const { return heads[last & (Window - 1)] != UINT32_MAX; }
   template <class Prefetch> uint64_t minimum(Prefetch prefetch) {
-    if (ready())
-      return last;
-    uint64_t next = active ? next_near() : UINT64_MAX;
-    // The explicit no-near case also handles a lone UINT64_MAX key.
-    if (!far.empty() && (!active || far.front().first < next)) {
-      last = far.front().first;
-      while (!far.empty() && far.front().first - last < Window) {
-        std::pop_heap(far.begin(), far.end(), std::greater<Item>{});
-        auto item = far.back();
-        far.pop_back();
-        near(item.first, item.second);
+    if (buckets[0].empty()) {
+      unsigned b = std::countr_zero(active) + 1;
+      last = UINT64_MAX;
+      for (auto item : buckets[b])
+        last = std::min(last, item.first);
+      for (auto item : buckets[b]) {
+        if (item.first == last)
+          prefetch(item.second);
+        unsigned dest = bucket(last ^ item.first);
+        buckets[dest].push_back(item);
+        if (dest)
+          active |= uint64_t{1} << (dest - 1);
       }
-    } else
-      last = next;
-    for (uint32_t at = heads[last & (Window - 1)]; at != UINT32_MAX;
-         at = arena[at].next)
-      prefetch(arena[at].node);
+      buckets[b].clear();
+      active &= ~(uint64_t{1} << (b - 1));
+    }
     return last;
   }
   uint64_t minimum() {
@@ -91,39 +51,26 @@ template <unsigned Window> struct DialQueue {
   }
   Item pop() {
     minimum();
-    uint32_t slot = last & (Window - 1), id = heads[slot],
-             node = arena[id].node;
-    heads[slot] = arena[id].next;
-    arena[id].next = free;
-    free = id;
-    if (heads[slot] == UINT32_MAX) {
-      occupied[slot / 64] &= ~(uint64_t{1} << (slot % 64));
-      if (!occupied[slot / 64])
-        active &= ~(uint64_t{1} << (slot / 64));
-    }
+    Item item = buckets[0].back();
+    buckets[0].pop_back();
     --count;
-    return {last, node};
+    return item;
   }
   void clear() {
-    heads.fill(UINT32_MAX);
-    occupied.fill(0);
-    arena.clear();
-    far.clear();
-    free = UINT32_MAX;
-    active = last = count = 0;
+    for (auto &bucket : buckets)
+      bucket.clear();
+    count = 0;
+    last = 0;
+    active = 0;
   }
 };
-using RadixHeap = DialQueue<1024>;
 // The state grows with nodes visited by a query, rather than every graph node.
 
 struct SearchState {
-  // Three mirrored slots make four-lane probes at the table end contiguous.
-  // Only real slots participate in rehashing; mirrors follow every low-slot
-  // write. Low word: node, generation and wide flag. High word: uint32 distance
-  // or an index into the exact uint64 side array. Wrapping generations clear
-  // all slots before any old side-array index can become visible again.
-  std::vector<uint64_t> entries = std::vector<uint64_t>(1027), wide;
-  size_t table_size = 1024;
+  // Low word: node, generation and wide flag. High word: uint32 distance or
+  // an index into the exact uint64 side array. Wrapping generations clear all
+  // slots before any old side-array index can become visible again.
+  std::vector<uint64_t> entries = std::vector<uint64_t>(1024), wide;
   std::array<uint64_t, 1024> filter{};
   size_t used = 0;
   unsigned bits;
@@ -153,71 +100,51 @@ struct SearchState {
   uint64_t distance(uint64_t entry) const {
     return uint32_t(entry) & 0x80000000U ? wide[entry >> 32] : entry >> 32;
   }
-  size_t locate(uint32_t node) const {
-    size_t slot = hash(node) & (table_size - 1);
-
-    auto keymask = _mm256_set1_epi64x(0x7fffffffU),
-         key = _mm256_set1_epi64x(uint64_t(tag) | node);
-    auto generationmask = _mm256_set1_epi64x(epoch_mask),
-         generation = _mm256_set1_epi64x(tag);
-    for (;;) {
-      auto values = _mm256_loadu_si256(
-          reinterpret_cast<const __m256i *>(entries.data() + slot));
-      unsigned match = _mm256_movemask_pd(_mm256_castsi256_pd(
-          _mm256_cmpeq_epi64(_mm256_and_si256(values, keymask), key)));
-      // Without deletion a matching key cannot lie past an earlier empty slot.
-      if (match)
-        return (slot + std::countr_zero(match)) & (table_size - 1);
-      unsigned occupied =
-          _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(
-              _mm256_and_si256(values, generationmask), generation)));
-      if (occupied != 15)
-        return (slot + std::countr_zero(occupied ^ 15)) & (table_size - 1);
-      slot = (slot + 4) & (table_size - 1);
-    }
-  }
   uint64_t get(uint32_t node) const {
-    uint64_t entry = entries[locate(node)];
-    return (uint32_t(entry) & epoch_mask) == tag ? distance(entry) : UINT64_MAX;
+    size_t slot = hash(node) & (entries.size() - 1);
+    while ((uint32_t(entries[slot]) & epoch_mask) == tag) {
+      uint64_t entry = entries[slot];
+      if ((uint32_t(entry) & node_mask) == node)
+        return distance(entry);
+      slot = (slot + 1) & (entries.size() - 1);
+    }
+    return UINT64_MAX;
   }
   uint64_t cross(uint32_t node) const {
     if (!(filter[(node >> 6) & 1023] & (uint64_t{1} << (node & 63))))
       return UINT64_MAX;
     return get(node);
   }
-  __attribute__((cold, noinline)) void grow() {
-    auto old = std::move(entries);
-    table_size *= 2;
-    entries.assign(table_size + 3, 0);
-    for (auto entry : std::span(old.data(), old.size() - 3))
-      if ((uint32_t(entry) & epoch_mask) == tag) {
-        size_t slot = hash(uint32_t(entry) & node_mask) & (table_size - 1);
-        while ((uint32_t(entries[slot]) & epoch_mask) == tag)
-          slot = (slot + 1) & (table_size - 1);
-        entries[slot] = entry;
-      }
-    std::copy_n(entries.data(), 3, entries.data() + table_size);
-  }
-  __attribute__((cold, noinline)) uint64_t pack_wide(uint32_t node,
-                                                     uint64_t value) {
-    uint64_t index = wide.size();
-    if (index > UINT32_MAX)
-      throw std::runtime_error("wide label index overflow");
-    wide.push_back(value);
-    return (index << 32) | tag | 0x80000000U | node;
-  }
   bool relax(uint32_t node, uint64_t value) {
-    if ((used + 1) * 4 > table_size * 3)
-      grow();
-    size_t slot = locate(node);
+    if ((used + 1) * 4 > entries.size() * 3) {
+      auto old = std::move(entries);
+      entries.assign(old.size() * 2, 0);
+      for (auto entry : old)
+        if ((uint32_t(entry) & epoch_mask) == tag) {
+          size_t slot =
+              hash(uint32_t(entry) & node_mask) & (entries.size() - 1);
+          while ((uint32_t(entries[slot]) & epoch_mask) == tag)
+            slot = (slot + 1) & (entries.size() - 1);
+          entries[slot] = entry;
+        }
+    }
+    size_t slot = hash(node) & (entries.size() - 1);
+    while ((uint32_t(entries[slot]) & epoch_mask) == tag &&
+           (uint32_t(entries[slot]) & node_mask) != node)
+      slot = (slot + 1) & (entries.size() - 1);
     bool fresh = (uint32_t(entries[slot]) & epoch_mask) != tag;
     if (!fresh && value >= distance(entries[slot]))
       return false;
-    uint64_t encoded = value > UINT32_MAX ? pack_wide(node, value)
-                                          : (value << 32) | tag | node;
-    entries[slot] = encoded;
-    if (slot < 3)
-      entries[table_size + slot] = entries[slot];
+    uint64_t packed = value;
+    uint32_t flags = 0;
+    if (value > UINT32_MAX) {
+      packed = wide.size();
+      if (packed > UINT32_MAX)
+        throw std::runtime_error("wide label index overflow");
+      wide.push_back(value);
+      flags = 0x80000000U;
+    }
+    entries[slot] = (packed << 32) | tag | flags | node;
     if (fresh) {
       ++used;
       filter[(node >> 6) & 1023] |= uint64_t{1} << (node & 63);
@@ -422,7 +349,7 @@ int main(int argc, char **argv) {
           __builtin_prefetch(nodes[side].get() + u, 0, 3);
           __builtin_prefetch(
               state[side].entries.data() +
-                  (SearchState::hash(u) & (state[side].table_size - 1)),
+                  (SearchState::hash(u) & (state[side].entries.size() - 1)),
               0, 3);
         });
       };
@@ -467,27 +394,16 @@ int main(int argc, char **argv) {
             __builtin_prefetch(nodes[side].get() + u, 0, 3);
             __builtin_prefetch(
                 state[side].entries.data() +
-                    (SearchState::hash(u) & (state[side].table_size - 1)),
+                    (SearchState::hash(u) & (state[side].entries.size() - 1)),
                 0, 3);
-          } while (count < batch.size() && heap[side].ready());
-          for (size_t j = 0; j < count; ++j) {
-            uint32_t u = batch[j].second;
-            const auto &node = nodes[side][u];
-            auto prefetch_arc = [&](uint32_t code) {
-              uint32_t v = decode(side, code).v;
-              size_t hash = SearchState::hash(v);
-              __builtin_prefetch(state[side].entries.data() +
-                                     (hash & (state[side].table_size - 1)),
-                                 1, 3);
-            };
-            for (unsigned k = 0; k < (node.range >> 30); ++k)
-              prefetch_arc(node.arcs[k]);
-          }
+          } while (count < batch.size() && !heap[side].buckets[0].empty());
           for (size_t j = 0; j < count; ++j) {
             auto [d, u] = batch[j];
 
             if (d != state[side].get(u))
               continue;
+            if (auto opposite = state[other].cross(u); opposite != UINT64_MAX)
+              best = std::min(best, d + opposite);
             auto visit = [&](uint32_t code) {
               auto [v, w] = decode(side, code);
               uint64_t nd = d + w;

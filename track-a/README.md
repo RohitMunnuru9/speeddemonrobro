@@ -17,14 +17,14 @@ without a second joined copy or a new thread for every hour.
 Endpoints sort bytewise. Duplicate records count separately; all ranks and rates
 use integer arithmetic.
 
-After their final output rendezvous, workers drop borrowed-key state and wait
-until every input reader has finished. They then release disjoint page-aligned
-parts of the input mapping in parallel. The main owner is disarmed after they
-join. Output errors still lead every worker through this cleanup path.
+The mapping owner outlives both scoped worker phases. Worker state drops its
+borrowed endpoint keys before the scope joins; the owner then releases the
+mapping once, including when writing the output returns an error. The parallel
+teardown experiment was rejected after its official score was lower.
 
 No external crates. The allowlisted Rust compiler builds offline with thin LTO.
 Unsafe code is limited to the read-only mapping, bounded byte searches, unaligned
-in-slice loads, AVX2 parsing and coordinated release after all readers finish.
+in-slice loads, AVX2 parsing and mapping release after all readers finish.
 Build and run the Dockerfile; optional arguments select local input/output paths.
 
 With another 24 hours: compare persistent worker scheduling and radix selection,

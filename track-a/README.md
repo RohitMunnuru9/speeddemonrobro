@@ -1,31 +1,30 @@
 # A: Ingest
 
-This Rust entry maps the input read-only. Twelve workers first index contiguous
-runs of each hour, preserving every run even when hours return out of order.
-Each subsequent job exclusively owns one hour, so latency groups need no merge
-or shared writes. Worker hash tables borrow endpoint bytes from the mapping;
-sampled hashes always resolve collisions with full byte equality. Tables and
-latency vector capacity are reused across hours.
+Workers parse line-aligned pieces in one pass. A fixed shared endpoint table
+claims empty slots atomically, copies the complete endpoint, then publishes it.
+Every hash match compares all endpoint bytes. Long keys and crowded probe chains
+use an exact locked overflow map with stable owned storage. Names and IDs are
+discovered from the current input; no catalogue or answer is stored in the image.
 
-Bounded AVX2 loads find spaces and LF within a 64-byte record window; longer
-records and tails use scalar parsing. Known-length decimal conversion covers
-the full uint32 latency range. Small groups are sorted; larger groups use exact
-selection at the three nearest ranks. Persistent workers send completed hours
-through rendezvous channels. Each worker can hold one pending output buffer,
-plus the writer's current buffer, so output is bounded and written in order
-without a second joined copy or a new thread for every hour.
-Endpoints sort bytewise. Duplicate records count separately; all ranks and rates
-use integer arithmetic.
+Records contain a full uint32 latency, exact endpoint ID and error bit. Workers
+reserve disjoint chunks inside anonymous per-hour regions. Counts publish the
+written rows. An hour's regions return to the OS after its counting scatter.
+Percentiles use nearest-rank integer arithmetic, sorting for small groups and
+exact selection for larger groups. Output names sort by unsigned byte order.
 
-The mapping owner outlives both scoped worker phases. Worker state drops its
-borrowed endpoint keys before the scope joins; the owner then releases the
-mapping once, including when writing the output returns an error. The parallel
-teardown experiment was rejected after its official score was lower.
+Completed pieces advance a contiguous input frontier. The first unparsed
+piece's hour is a scheduling hint for finishing older hours. It is never a
+correctness assumption: writers register before checking whether an hour is
+closed, and a closer closes before waiting for registered writers. A later
+record for a closed hour discards the attempt and retries with every hour held
+open until parsing ends. The same output file is truncated and rewritten.
+Arbitrarily reordered input remains exact, at the cost of the retry.
 
-No external crates. The allowlisted Rust compiler builds offline with thin LTO.
-Unsafe code is limited to the read-only mapping, bounded byte searches, unaligned
-in-slice loads, AVX2 parsing and mapping release after all readers finish.
-Build and run the Dockerfile; optional arguments select local input/output paths.
+Completed-hour output is written in order. Workers join before mappings or
+catalogues are destroyed, including after an output failure. The final image
+contains only the executable. The offline C++20 build uses full-size generated
+seed-17 compiler training; no training data or answers enter the final image.
 
-With another 24 hours: compare persistent worker scheduling and radix selection,
-including thread startup and memory costs. Retain changes when measured K improves.
+The Rust version of this streaming architecture was also measured. The selected
+C++ version had lower local runtime and fewer canonical source lines. Official
+measurements, rejected trials and validation are in PERF.md.

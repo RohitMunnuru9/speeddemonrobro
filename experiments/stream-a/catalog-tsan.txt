@@ -1,0 +1,9 @@
+.build/a-catalog-unit.cpp: In function ‘bool run_pass(const std::string&, const std::string&, size_t, bool)’:
+.build/a-catalog-unit.cpp:137:187: warning: ignoring attributes on template argument ‘int (*)(FILE*)’ [-Wignored-attributes]
+  137 |  std::filesystem::create_directories(out);FILE *raw=fopen((out+"/summary.txt").c_str(),"wb");if(!raw)throw std::runtime_error("open output failed");std::unique_ptr<FILE,decltype(&fclose)> file(raw,fclose);
+      |                                                                                                                                                                                           ^
+.build/a-catalog-unit.cpp: In function ‘int solution_main(int, char**)’:
+.build/a-catalog-unit.cpp:186:70: warning: control reaches end of non-void function [-Wreturn-type]
+  186 |  }catch(const std::exception &e){std::cerr<<e.what()<<'\n';return 1;}}
+      |                                                                      ^
+catalog publication, exact collisions and overflow passed (12 workers)

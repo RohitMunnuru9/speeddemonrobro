@@ -1,6 +1,6 @@
 # vayu — Speed Demon 2026
 
-Four independent entries: A Ingest in Rust; B Index, C Join and D Traverse in C++20. Each track
+Four independent C++20 entries: A Ingest, B Index, C Join and D Traverse. Each track
 builds offline and has no nonstandard runtime dependencies. MIT licensed.
 
 The organizer and starter checkouts are local reference material, ignored by Git.
@@ -32,15 +32,14 @@ All four tracks passed organizer board runs on October 31, 2026.
 Each track's PERF.md records its exact run ID and measurements. Local measurements
 and practice-board results are distinct from final holdout scoring.
 
-The November 2 final trial passed every official gate but did not improve B or D.
-Those experiments were reverted. [FINAL_STATE.md](FINAL_STATE.md) identifies the
-retained implementations, official scores and the Rust experiments. The branch
-tip uses the exact runtime sources of our strongest verified configurations;
-the observed overall machine score was 70.7270. An 80-point result was not achieved.
+The current A candidate uses streaming parsing, an exact shared endpoint table
+and per-hour record regions, with a complete retry for late records. Its official
+score is pending. B, C and D retain their strongest verified implementations.
+[FINAL_STATE.md](FINAL_STATE.md) records the candidate/rollback status. The last
+verified overall machine score was 70.7270; 80 points has not been achieved.
 
 The C++ offline builds use compiler profile guidance from an independently generated
-full-size seed-17 dataset. Rust A uses an offline standard-library-only Cargo build
-with thin LTO and no compiler training. Only each compiled executable enters its final image; it builds
+full-size seed-17 dataset. Only each compiled executable enters its final image; it builds
 all data structures from the supplied runtime files. The training generators are
 byte-identical copies of the published organizer sources, excluded from S under
 the published-copies rule. No training outputs or precomputed answers are shipped.

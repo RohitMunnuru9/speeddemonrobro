@@ -165,3 +165,43 @@ not a claim of a new algorithmic gain.
 
 Restored-source receipt at 17c357c: run-52c9bf5f550c, all gates passed,
 T=0.045429 s, S=371, points=75.098836. The 75.625792 best remains retained.
+
+November 2 continued A trial: replace the full hour-index pass with streaming
+piece parsing and per-hour record regions. Endpoint IDs come from a shared exact
+4096-slot catalogue with full copied names, acquire/release publication and an
+unbounded exact overflow map. A version and ready-entry-count check prevent a
+sorted snapshot built during a BUSY insertion from remaining cached afterwards.
+All keys remain immutable until workers join. Stable storage preserves overflow
+views during concurrent additions.
+
+Each active piece/hour registers a writer before checking the hour's state.
+Closing changes that state before waiting for zero registered writers. Late
+records trigger a complete retry with early closing disabled. Piece-frontier
+timestamps therefore change performance only; no bound on input disorder is
+assumed. Anonymous record regions are returned after finishing each hour.
+
+The equivalent Rust streaming version used private maps, then a shared exact
+catalogue. The shared-table Rust trial showed roughly 13–17% lower local wall
+time, but canonical source was 746 nonblank/noncomment lines. C++ expresses the
+same architecture in substantially fewer lines. Eight warm paired actual PGO
+comparisons gave C++/retained-Rust median wall ratio 0.67584, CPU ratio 0.73601,
+and process-RSS ratio 1.00988. RSS includes mapped input and is not the scoring
+memory axis. A sealed local cgroup peak was 23,404,544 bytes versus roughly
+21.4 MB for retained Rust. This tradeoff requires an official K comparison.
+
+The candidate matches all six public tiny/sample/full seeds 1/2 and the saved
+independent full seed-17 reference. It passes the existing 12 checks with 18,963
+shuffled records, plus late-hour retry, multi-region single-hour and forced
+collision/overflow cases at one/twelve workers, and an early /dev/full failure.
+Catalogue publication/cache tests and 12-worker collision tests pass under
+AddressSanitizer/UndefinedBehaviorSanitizer and ThreadSanitizer.
+
+Sealed full hashes:
+seed 1: 495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3
+seed 17: 8425e98480a26cf8de7a49507752da24fe522fe47814107b8d1870681365989a.
+Official measurement is pending; this is not yet an 80-point result. Retain this
+trial only if it beats the preceding K=32.547366.
+
+The copied-name and streaming/retry hypotheses were informed by Cache Me's
+public investigations, with independently written implementations:
+https://github.com/manusingh090/speed-demon-2026-entry/blob/speed-demon/track-a/PERF.md

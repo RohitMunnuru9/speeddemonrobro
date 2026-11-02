@@ -19,7 +19,7 @@ def run(args):
 
 
 def compile_entry(track, binary):
-    if track == "a":
+    if track == "a" and (ROOT / "track-a/Cargo.toml").exists():
         run(["docker", "run", "--rm", "--network=none", "-v", f"{ROOT / 'track-a'}:/src:ro",
              "-v", f"{binary.parent}:/output", "-w", "/src", "-e", "CARGO_TARGET_DIR=/tmp/target",
              "-e", "RUSTFLAGS=-C target-cpu=x86-64-v3",
